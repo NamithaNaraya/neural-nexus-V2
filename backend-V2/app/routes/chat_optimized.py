@@ -20,10 +20,27 @@ from app.services.analytics_chat.analytic_chat_service import AnalyticChatServic
 from app.services.chat_workflow import get_langgraph_rag_service
 from app.db.connections import get_neo4j_driver, get_postgres_session
 
-router = APIRouter(prefix="/chat-optimized", tags=["Chat"])
+router = APIRouter(prefix="/chat-optimized", tags=["chat"])
+combined_router = APIRouter(prefix="/combined-chat", tags=["Combined Chat"])
 
 logger = logging.getLogger(__name__)
 
+# ===== Pydantic Models =====
+class ChatQueryRequest(BaseModel):
+    query: str
+    folder_id: Optional[str] = None
+    node_ids: Optional[List[str]] = None
+    conversation_history: Optional[List[Dict[str, str]]] = None
+    session_id: Optional[str] = None
+    enable_streaming: bool = True
+
+class ChatQueryResponse(BaseModel):
+    answer: str
+    citations: List[Dict[str, Any]]
+    session_id: str
+    related_nodes: List[str]
+    error: Optional[str] = None
+    processing_time_ms: float
 
 class ChatRequest(BaseModel):
     question: str
@@ -229,22 +246,31 @@ class CombinedRAGService:
                 }
             }) + "\n"
 
-            # --- Fix 6: Run GDS algorithms for structural/aggregate queries ---
+            # --- GDS: Run the algorithm detected by the router (structural/aggregate/pathfinding) ---
             gds_algorithm = None
             gds_results_data = []
             query_type = initial_state["query_type"]
-            
-            if query_type in ("structural", "aggregate") and folder_id:
+            router_gds_hint = initial_state.get("gds_algorithm")  # Specific algorithm from router
+
+            # Trigger GDS when: structural or aggregate always; relationship only when algo was detected
+            should_run_gds = (
+                query_type in ("structural", "aggregate") or
+                (query_type == "relationship" and router_gds_hint)
+            ) and bool(folder_id)
+
+            if should_run_gds:
                 try:
                     analytics_svc = AnalyticChatService()
                     gds_result = await analytics_svc.process_query(
                         query=question, folder_id=folder_id, node_ids=None
                     )
-                    gds_algorithm = gds_result.get("algorithm")
+                    gds_algorithm = gds_result.get("algorithm") or router_gds_hint
                     gds_results_data = gds_result.get("results", [])
                     logger.info(f"[Stream] GDS algorithm '{gds_algorithm}' returned {len(gds_results_data)} results")
                 except Exception as gds_err:
-                    logger.warning(f"[Stream] GDS integration skipped: {gds_err}")
+                    # Fall back to the router's detected algorithm name even if execution failed
+                    gds_algorithm = router_gds_hint
+                    logger.warning(f"[Stream] GDS execution skipped (using router hint '{gds_algorithm}'): {gds_err}")
             
             yield json.dumps({
                 "type": "gds_results",
@@ -270,9 +296,10 @@ class CombinedRAGService:
 
             vector_results = initial_state.get("vector_results", [])
             is_grounded = len(vector_results) > 0
-            grounding_score = 0.9 if is_grounded else 0.0
+            # Real grounding score: scales with number of matched nodes, capped at 1.0
+            grounding_score = min(len(vector_results) / 10.0, 1.0) if is_grounded else 0.0
             suggest_web_search = not is_grounded if not web_search else False
-            thin_context = not is_grounded
+            thin_context = len(vector_results) < 3
 
             yield json.dumps({
                 "type": "web_search_suggestion",
@@ -343,7 +370,12 @@ class CombinedRAGService:
                         yield json.dumps({"type": "content", "data": content}) + "\n"
                         full_answer += content
 
-            # --- Save chat history BEFORE yielding done (prevents lost saves on connection close) ---
+            elapsed_total = (time.time() - t_start) * 1000
+            logger.info(f"[Stream] Total stream_answer completed in {elapsed_total:.0f}ms")
+
+            # --- Persist to PostgreSQL BEFORE yielding done ---
+            # Saving here (not after done yield) guarantees the save completes
+            # even if the client disconnects immediately after the last content chunk.
             citations_metadata = {
                 "algorithm": gds_algorithm,
                 "folder_id": folder_id,
@@ -366,36 +398,32 @@ class CombinedRAGService:
             except (ValueError, TypeError):
                 db_session_id = str(uuid.uuid5(uuid.NAMESPACE_OID, db_session_id))
             
-            try:
-                async with get_postgres_session() as pg_session:
-                    # Save user message
-                    await pg_session.execute(
-                        sa_text("""
-                            INSERT INTO neural_nexus.chat_history (user_id, session_id, role, message, citations)
-                            VALUES (:user_id, :session_id, 'user', :message, NULL)
-                        """),
-                        {"user_id": user_id, "session_id": db_session_id, "message": question}
-                    )
-                    # Save assistant message
-                    await pg_session.execute(
-                        sa_text("""
-                            INSERT INTO neural_nexus.chat_history (user_id, session_id, role, message, citations)
-                            VALUES (:user_id, :session_id, 'assistant', :message, CAST(:citations AS JSONB))
-                        """),
-                        {
-                            "user_id": user_id,
-                            "session_id": db_session_id,
-                            "message": full_answer,
-                            "citations": json.dumps(citations_metadata),
-                        }
-                    )
-                    await pg_session.commit()
-                    logger.info(f"[Stream] Batched save: user+assistant in session {db_session_id}")
-            except Exception as save_err:
-                logger.warning(f"[Stream] Failed to batch-save chat history: {save_err}")
-
-            elapsed_total = (time.time() - t_start) * 1000
-            logger.info(f"[Stream] Total stream_answer completed in {elapsed_total:.0f}ms")
+            if full_answer and user_id and user_id != "anonymous":
+                try:
+                    async with get_postgres_session() as pg_session:
+                        await pg_session.execute(
+                            sa_text("""
+                                INSERT INTO neural_nexus.chat_history (user_id, session_id, role, message, citations)
+                                VALUES (:user_id, :session_id, 'user', :message, NULL)
+                            """),
+                            {"user_id": user_id, "session_id": db_session_id, "message": question}
+                        )
+                        await pg_session.execute(
+                            sa_text("""
+                                INSERT INTO neural_nexus.chat_history (user_id, session_id, role, message, citations)
+                                VALUES (:user_id, :session_id, 'assistant', :message, CAST(:citations AS JSONB))
+                            """),
+                            {
+                                "user_id": user_id,
+                                "session_id": db_session_id,
+                                "message": full_answer,
+                                "citations": json.dumps(citations_metadata),
+                            }
+                        )
+                        await pg_session.commit()
+                        logger.info(f"[Stream] Saved user+assistant for session {db_session_id}")
+                except Exception as save_err:
+                    logger.warning(f"[Stream] Failed to save chat history: {save_err}")
 
             yield json.dumps({"type": "done"}) + "\n"
 
@@ -446,9 +474,19 @@ async def web_search_primary(
     user_id = current_user.get("id") or current_user.get("sub")
     res = await run_simulated_web_search(request.question)
     sources = res.get("sources", [])
-    await save_chat_history_row(user_id, request.session_id, "web_search", res.get("answer", ""), sources)
+    answer_text = res.get("answer", "")
+    # Save with structured web_search_attachment so frontend can restore on hydration
+    citations_obj = {
+        "web_search_attachment": {
+            "answer": answer_text,
+            "sources": sources
+        }
+    }
+    # Save the user question first, then the web search answer as assistant
+    await save_chat_history_row(user_id, request.session_id, "user", request.question)
+    await save_chat_history_row(user_id, request.session_id, "assistant", answer_text, citations_obj)
     return {
-        "answer": res.get("answer", ""),
+        "answer": answer_text,
         "source": "web_search",
         "grounding_metadata": {
             "search_entry_point": None,
@@ -463,10 +501,10 @@ async def general_answer_primary(
 ):
     prompt = (
         f"You are a knowledgeable assistant. The user asked a question that had no matching data "
-        f"in their knowledge graph database. They have now requested a general knowledge answer.\n\n"
+        f"in their knowledge graph database. They have requested an answer from your general training knowledge.\n\n"
         f"Question: {request.question}\n\n"
         f"Provide a helpful, accurate answer based on your general training knowledge. "
-        f"Start your response with: '⚠️ **General Knowledge Answer** (not from your database):\\n\\n' "
+        f"Start your response with: '**General Knowledge** — this answer comes from AI training data, not your uploaded documents.\\n\\n' "
         f"Then answer the question thoroughly but concisely."
     )
 
@@ -491,7 +529,9 @@ async def general_answer_primary(
             except Exception:
                 continue
         await save_chat_history_row(user_id, request.session_id, "user", request.question)
-        await save_chat_history_row(user_id, request.session_id, "assistant", full_text)
+        # Mark as general answer so frontend can restore the UI state on hydration
+        citations_obj = {"is_general_answer": True}
+        await save_chat_history_row(user_id, request.session_id, "assistant", full_text, citations_obj)
 
     return StreamingResponse(
         stream_and_save(),
@@ -503,8 +543,302 @@ async def general_answer_primary(
         },
     )
 
-# Dead endpoints removed:
-# - /query and /query-stream (frontend uses /stream-answer)
-# - /analytics-query (GDS analytics integrated into /stream-answer)
-# - /health (redundant with /api/v1/health)
-# - combined_router (duplicate of chat-optimized)
+# ===== Router: /chat-optimized/query-stream =====
+@router.post("/query-stream")
+async def stream_chat_query(
+    request: ChatQueryRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    logger.info(f"[Chat-Stream] New streamed query from user {current_user.get('id')}: {request.query[:50]}...")
+    user_id = current_user.get("id") or current_user.get("sub")
+
+    try:
+        scope = None
+        if request.folder_id:
+            async with get_postgres_session() as db:
+                result = await db.execute(
+                    sa_text("SELECT id FROM folders WHERE id = :fid AND owner_id = :uid"),
+                    {"fid": request.folder_id, "uid": current_user.get('id')}
+                )
+                if not result.fetchone():
+                    raise HTTPException(status_code=403, detail="Folder access denied")
+            scope = {"type": "folder", "id": request.folder_id}
+        elif request.node_ids:
+            scope = {"type": "selection", "id": ",".join(request.node_ids)}
+
+        # Use session_id from request or generate a new one
+        raw_session_id = request.session_id or str(uuid.uuid4())
+        try:
+            session_id = str(uuid.UUID(raw_session_id))
+        except (ValueError, TypeError):
+            session_id = str(uuid.uuid5(uuid.NAMESPACE_OID, raw_session_id))
+
+        rag_service = get_langgraph_rag_service()
+
+        async def answer_generator():
+            full_answer = ""
+            try:
+                async for chunk in rag_service.query_streaming(
+                    question=request.query,
+                    session_id=session_id,
+                    history=request.conversation_history or [],
+                    scope=scope
+                ):
+                    full_answer += chunk
+                    yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+                yield f"data: {json.dumps({'done': True})}\n\n"
+            except Exception as e:
+                logger.error(f"[Chat-Stream] Error during streaming: {e}")
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            finally:
+                # Persist both user question and assistant answer to PostgreSQL
+                if user_id and full_answer:
+                    try:
+                        async with get_postgres_session() as pg_session:
+                            await pg_session.execute(
+                                sa_text("""
+                                    INSERT INTO neural_nexus.chat_history
+                                        (user_id, session_id, role, message, citations)
+                                    VALUES (:uid, :sid, 'user', :msg, NULL)
+                                """),
+                                {"uid": user_id, "sid": session_id, "msg": request.query}
+                            )
+                            await pg_session.execute(
+                                sa_text("""
+                                    INSERT INTO neural_nexus.chat_history
+                                        (user_id, session_id, role, message, citations)
+                                    VALUES (:uid, :sid, 'assistant', :msg,
+                                            CAST(:cit AS JSONB))
+                                """),
+                                {
+                                    "uid": user_id,
+                                    "sid": session_id,
+                                    "msg": full_answer,
+                                    "cit": json.dumps({"folder_id": request.folder_id}),
+                                }
+                            )
+                            await pg_session.commit()
+                            logger.info(f"[Chat-Stream] Saved history for session {session_id}")
+                    except Exception as save_err:
+                        logger.warning(f"[Chat-Stream] Failed to save history: {save_err}")
+
+        return StreamingResponse(
+            answer_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Chat-Stream] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ===== Router: /chat-optimized/query =====
+@router.post("/query")
+async def chat_query(
+    request: ChatQueryRequest,
+    current_user: dict = Depends(get_current_user),
+) -> ChatQueryResponse:
+    start_time = time.time()
+    logger.info(f"[Chat] Query from user {current_user.get('id')}: {request.query[:50]}...")
+
+    try:
+        scope = None
+        if request.folder_id:
+            async with get_postgres_session() as db:
+                result = await db.execute(
+                    sa_text("SELECT id FROM folders WHERE id = :fid AND owner_id = :uid"),
+                    {"fid": request.folder_id, "uid": current_user.get('id')}
+                )
+                if not result.fetchone():
+                    raise HTTPException(status_code=403, detail="Folder access denied")
+            scope = {"type": "folder", "id": request.folder_id}
+        elif request.node_ids:
+            scope = {"type": "selection", "id": ",".join(request.node_ids)}
+
+        rag_service = get_langgraph_rag_service()
+        result = await rag_service.query(
+            question=request.query,
+            session_id=f"{current_user.get('id')}_{int(start_time)}",
+            history=request.conversation_history or [],
+            scope=scope
+        )
+
+        elapsed_ms = (time.time() - start_time) * 1000
+        logger.info(f"[Chat] Query completed in {elapsed_ms:.0f}ms")
+
+        return ChatQueryResponse(
+            answer=result["answer"],
+            citations=result["citations"],
+            session_id=result["session_id"],
+            related_nodes=result["related_nodes"],
+            error=result.get("error"),
+            processing_time_ms=elapsed_ms
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Chat] Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ===== Router: /chat-optimized/analytics-query =====
+@router.post("/analytics-query")
+async def analytics_query(
+    request: ChatQueryRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    logger.info(f"[Analytics] Query from user {current_user.get('id')}: {request.query[:50]}...")
+    try:
+        service = AnalyticChatService()
+        result = await service.process_query(
+            query=request.query,
+            folder_id=request.folder_id,
+            node_ids=request.node_ids
+        )
+        return {
+            "answer": result.get("answer"),
+            "algorithm": result.get("algorithm"),
+            "results": result.get("results", []),
+            "resolved_entities": result.get("resolved_entities", [])
+        }
+    except Exception as e:
+        logger.error(f"[Analytics] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ===== Router: /chat-optimized/health =====
+@router.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "service": "chat-optimized",
+        "features": [
+            "streaming-responses",
+            "entity-disambiguation",
+            "scope-filtering",
+            "parallel-queries",
+            "fast-rag",
+            "langgraph-workflow"
+        ]
+    }
+
+# ===== Compatibility Routes: /combined-chat/... =====
+@combined_router.post("/answer")
+async def get_combined_answer(
+    request: ChatRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = current_user.get("id") or current_user.get("sub")
+    return await _rag_service.answer(
+        question=request.question,
+        folder_id=request.folder_id,
+        history=request.history,
+        user_id=user_id
+    )
+
+@combined_router.post("/stream-answer")
+async def stream_combined_answer(
+    request: ChatRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = current_user.get("id") or current_user.get("sub")
+    return StreamingResponse(
+        _rag_service.stream_answer(
+            question=request.question,
+            folder_id=request.folder_id,
+            history=request.history,
+            user_id=user_id,
+            session_id=request.session_id,
+            web_search=request.web_search,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+            "Transfer-Encoding": "chunked",
+        }
+    )
+
+@combined_router.post("/web-search")
+async def web_search(
+    request: WebSearchRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = current_user.get("id") or current_user.get("sub")
+    res = await run_simulated_web_search(request.question)
+    sources = res.get("sources", [])
+    answer_text = res.get("answer", "")
+    # Save with structured web_search_attachment so frontend can restore on hydration
+    citations_obj = {
+        "web_search_attachment": {
+            "answer": answer_text,
+            "sources": sources
+        }
+    }
+    await save_chat_history_row(user_id, request.session_id, "user", request.question)
+    await save_chat_history_row(user_id, request.session_id, "assistant", answer_text, citations_obj)
+    
+    return {
+        "answer": answer_text,
+        "source": "web_search",
+        "grounding_metadata": {
+            "search_entry_point": None,
+            "grounding_chunks": sources
+        }
+    }
+
+@combined_router.post("/general-answer")
+async def general_answer(
+    request: GeneralAnswerRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    prompt = (
+        f"You are a knowledgeable assistant. The user asked a question that had no matching data "
+        f"in their knowledge graph database. They have requested an answer from your general training knowledge.\n\n"
+        f"Question: {request.question}\n\n"
+        f"Provide a helpful, accurate answer based on your general training knowledge. "
+        f"Start your response with: '**General Knowledge** — this answer comes from AI training data, not your uploaded documents.\\n\\n' "
+        f"Then answer the question thoroughly but concisely."
+    )
+
+    async def stream_general():
+        ai = get_ai_service()
+        async for chunk in ai.llm.astream(prompt):
+            content = chunk.content if hasattr(chunk, "content") else str(chunk)
+            if content:
+                yield json.dumps({"type": "content", "data": content}) + "\n"
+        yield json.dumps({"type": "done"}) + "\n"
+
+    user_id = current_user.get("id") or current_user.get("sub")
+
+    async def stream_and_save():
+        full_text = ""
+        async for item in stream_general():
+            yield item
+            try:
+                parsed = json.loads(item.strip())
+                if parsed.get("type") == "content":
+                    full_text += parsed["data"]
+            except Exception:
+                continue
+        
+        await save_chat_history_row(user_id, request.session_id, "user", request.question)
+        # Mark as general answer so frontend can restore the UI state on hydration
+        citations_obj = {"is_general_answer": True}
+        await save_chat_history_row(user_id, request.session_id, "assistant", full_text, citations_obj)
+
+    return StreamingResponse(
+        stream_and_save(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )

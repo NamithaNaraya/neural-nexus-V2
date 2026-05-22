@@ -198,6 +198,15 @@ async def get_chat_history(
                     msg["results"] = citations["gds_results"]
                 if "grounding" in citations:
                     msg["dataGrounding"] = citations["grounding"]
+                # Unpack web search attachment into root fields
+                web_attachment = citations.get("web_search_attachment")
+                if isinstance(web_attachment, dict):
+                    msg["webSearchAnswer"] = web_attachment.get("answer", "")
+                    msg["webSearchSources"] = web_attachment.get("sources", [])
+                    msg["isWebSearch"] = True
+                # Unpack general answer marker
+                if citations.get("is_general_answer"):
+                    msg["isGeneralAnswer"] = True
             messages.append(msg)
         
         return {

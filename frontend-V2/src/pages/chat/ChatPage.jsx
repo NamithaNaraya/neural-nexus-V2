@@ -270,6 +270,11 @@ export default function ChatPage() {
         }
         continue;
       }
+
+      // Find the preceding user message to derive originalQuestion
+      const precedingUserMsg = result.length > 0 ? result[result.length - 1] : null;
+      const originalQuestion = (precedingUserMsg?.role === 'user') ? precedingUserMsg.content : '';
+
       const normalizedMessage = {
         role: msg.role || 'assistant',
         content: msg.message || msg.content || '',
@@ -279,13 +284,36 @@ export default function ChatPage() {
         algorithm: msg.algorithm || null,
         results: msg.results || null,
         dataGrounding: msg.dataGrounding || null,
+        // Restore intent and context summary
+        intent: msg.intent || null,
+        contextSummary: msg.contextSummary || '',
       };
 
-      if (webAttachment) {
+      // Restore originalQuestion for assistant messages
+      if (normalizedMessage.role === 'assistant' && originalQuestion) {
+        normalizedMessage.originalQuestion = originalQuestion;
+      }
+
+      // Restore web search data — from direct fields (backend unpacks) or from web_search_attachment in citations
+      if (msg.webSearchAnswer || msg.isWebSearch) {
+        normalizedMessage.webSearchAnswer = msg.webSearchAnswer || '';
+        normalizedMessage.webSearchSources = Array.isArray(msg.webSearchSources)
+          ? normalizeWebSearchSources(msg.webSearchSources)
+          : [];
+        normalizedMessage.isWebSearch = true;
+        normalizedMessage.webSearchPending = false;
+      } else if (webAttachment) {
         normalizedMessage.webSearchAnswer = webAttachment.answer;
         normalizedMessage.webSearchSources = webAttachment.sources;
         normalizedMessage.isWebSearch = true;
         normalizedMessage.webSearchPending = false;
+      }
+
+      // Restore general answer — from isGeneralAnswer marker (content IS the general answer)
+      if (msg.isGeneralAnswer && normalizedMessage.role === 'assistant') {
+        normalizedMessage.generalAnswer = normalizedMessage.content;
+        normalizedMessage.isGeneralAnswer = true;
+        normalizedMessage.generalAnswerPending = false;
       }
 
       result.push(normalizedMessage);
@@ -549,9 +577,39 @@ export default function ChatPage() {
         if (rawMessages && rawMessages.length > 0) {
           const normalized = normalizeBackendMessages(rawMessages);
           attemptedSessionsHydrationRef.current.add(sessionId);
+
+          // Merge: for each message, prefer the source that has richer metadata.
+          // Local messages (from localStorage) may have fields the backend doesn't store yet.
+          const localMessages = session?.messages || [];
+          const merged = normalized.map((backendMsg, idx) => {
+            const localMsg = localMessages[idx];
+            if (!localMsg || localMsg.isWelcome) return backendMsg;
+            // If roles don't match at this index, backend is authoritative
+            if (localMsg.role !== backendMsg.role) return backendMsg;
+
+            // Enrich backend message with any local-only fields it's missing
+            const enriched = { ...backendMsg };
+            const richFields = [
+              'webSearchAnswer', 'webSearchSources', 'isWebSearch',
+              'generalAnswer', 'isGeneralAnswer',
+              'dataGrounding', 'algorithm', 'results',
+              'intent', 'contextSummary', 'originalQuestion',
+            ];
+            for (const field of richFields) {
+              const backendVal = backendMsg[field];
+              const localVal = localMsg[field];
+              const backendEmpty = backendVal == null || backendVal === '' || (Array.isArray(backendVal) && backendVal.length === 0);
+              const localHasValue = localVal != null && localVal !== '' && !(Array.isArray(localVal) && localVal.length === 0);
+              if (backendEmpty && localHasValue) {
+                enriched[field] = localVal;
+              }
+            }
+            return enriched;
+          });
+
           setWorkspace(prev => ({
             ...prev,
-            sessions: prev.sessions.map(s => s.id === sessionId ? { ...s, messages: normalized, messageCount: rawMessages.length } : s)
+            sessions: prev.sessions.map(s => s.id === sessionId ? { ...s, messages: merged, messageCount: rawMessages.length } : s)
           }));
         } else {
           attemptedSessionsHydrationRef.current.delete(sessionId);
@@ -646,7 +704,7 @@ export default function ChatPage() {
     }
     setLoading(true);
     try {
-      const response = await api.post('/chat-optimized/web-search', { question: searchQuery, context_hint: fallbackContext, session_id: workspace.currentSessionId || null });
+      const response = await api.post('/chat-optimized/web-search', { question: searchQuery, context_hint: fallbackContext, session_id: workspace.currentSessionId || null }, { timeout: 120000 });
       const fullAnswer = response.data?.answer || response.data?.response || 'No findings available.';
       const sources = normalizeWebSearchSources(response.data?.grounding_metadata);
       if (typeof messageIndex === 'number') {
@@ -830,7 +888,7 @@ export default function ChatPage() {
         streamFlushTimerRef.current = window.setTimeout(() => {
           streamFlushTimerRef.current = null;
           flushStreamBuffer();
-        }, 45);
+        }, 16);
       };
 
       const activeMessages = messages.filter(m => !m.isWelcome).map(m => ({ role: m.role, content: m.content }));
@@ -850,43 +908,56 @@ export default function ChatPage() {
         if (!response.ok) throw new Error('Network fault');
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
+        // Line buffer handles JSON objects split across multiple read() calls
+        let lineBuffer = '';
+        const processLine = (line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return;
+          try {
+            const chunk = JSON.parse(trimmed);
+            if (chunk.type === 'content') {
+              streamBufferRef.current += chunk.data;
+              scheduleStreamFlush();
+            } else if (chunk.type === 'gds_results') {
+              applyStreamMeta({
+                algorithm: chunk?.data?.algorithm || null,
+                results: Array.isArray(chunk?.data?.results) ? chunk.data.results : null,
+              });
+            } else if (chunk.type === 'intent') {
+              applyStreamMeta({
+                intent: chunk?.data || null,
+                contextSummary: String(chunk?.data?.research_strategy || '').trim(),
+              });
+            } else if (chunk.type === 'data_grounding') {
+              applyStreamMeta({
+                dataGrounding: chunk?.data || null,
+              });
+            } else if (chunk.type === 'web_search_result') {
+              applyStreamMeta({
+                isWebSearch: true,
+                webSearchPending: false,
+                isStreamingWebSearch: false,
+                webSearchAnswer: chunk?.data?.answer || '',
+                webSearchSources: normalizeWebSearchSources(chunk?.data?.sources),
+              });
+            }
+          } catch { /* parse fail — incomplete or non-JSON line */ }
+        };
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          const chunkStr = decoder.decode(value, { stream: true });
-          const lines = chunkStr.split('\n');
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-              const chunk = JSON.parse(line);
-              if (chunk.type === 'content') {
-                streamBufferRef.current += chunk.data;
-                scheduleStreamFlush();
-              } else if (chunk.type === 'gds_results') {
-                applyStreamMeta({
-                  algorithm: chunk?.data?.algorithm || null,
-                  results: Array.isArray(chunk?.data?.results) ? chunk.data.results : null,
-                });
-              } else if (chunk.type === 'intent') {
-                applyStreamMeta({
-                  intent: chunk?.data || null,
-                  contextSummary: String(chunk?.data?.research_strategy || '').trim(),
-                });
-              } else if (chunk.type === 'data_grounding') {
-                applyStreamMeta({
-                  dataGrounding: chunk?.data || null,
-                });
-              } else if (chunk.type === 'web_search_result') {
-                applyStreamMeta({
-                  isWebSearch: true,
-                  webSearchPending: false,
-                  isStreamingWebSearch: false,
-                  webSearchAnswer: chunk?.data?.answer || '',
-                  webSearchSources: normalizeWebSearchSources(chunk?.data?.sources),
-                });
-              }
-            } catch { /* parse fail */ }
+          lineBuffer += decoder.decode(value, { stream: true });
+          const lines = lineBuffer.split('\n');
+          // All but last line are complete — process them
+          for (let i = 0; i < lines.length - 1; i++) {
+            processLine(lines[i]);
           }
+          // Last segment may be incomplete — keep it in buffer
+          lineBuffer = lines[lines.length - 1];
+        }
+        // Flush any final incomplete line
+        if (lineBuffer.trim()) {
+          processLine(lineBuffer);
         }
       };
 

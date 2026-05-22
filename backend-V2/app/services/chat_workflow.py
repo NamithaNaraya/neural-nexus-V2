@@ -30,6 +30,7 @@ class ChatState(TypedDict):
     # Metadata and classification
     query_type: str  # "simple_lookup", "relationship", "aggregate", "structural"
     requires_scout: bool
+    gds_algorithm: Optional[str]  # Specific GDS algorithm detected from user intent
     
     # Context collected
     vector_results: List[Dict[str, Any]]
@@ -43,34 +44,163 @@ class ChatState(TypedDict):
     error: Optional[str]
 
 
-# ===== Node 1: Router Node (Fast Heuristic) =====
+# ===== Node 1: Router Node (Intent → GDS Algorithm Mapping) =====
+
+# --- Centrality ---
+_PAGERANK_KEYWORDS = frozenset([
+    "pagerank", "influential", "influence", "important", "importance",
+    "authority", "prominent", "significant", "key player", "key node",
+    "most impactful", "most relevant", "top node",
+])
+_BETWEENNESS_KEYWORDS = frozenset([
+    "betweenness", "bottleneck", "broker", "brokering", "intermediary",
+    "critical path", "critical node", "flow control", "mediator",
+])
+_CLOSENESS_KEYWORDS = frozenset([
+    "closeness", "accessible", "reachable", "reach everyone",
+    "closest to all", "average distance", "proximity",
+])
+_HITS_KEYWORDS = frozenset([
+    "hits", "hyperlink", "hub authority", "hubs and authorities",
+])
+_DEGREE_KEYWORDS = frozenset([
+    "degree", "most connections", "most connected", "highly connected",
+    "connection count", "link count", "most links",
+])
+_ARTICLERANK_KEYWORDS = frozenset([
+    "articlerank", "weighted rank", "weighted importance",
+])
+
+# --- Community Detection ---
+_LOUVAIN_KEYWORDS = frozenset([
+    "community", "communities", "cluster", "clusters", "clustering",
+    "group", "groups", "partition", "module", "modules",
+    "louvain", "leiden", "modularity",
+])
+_WCC_KEYWORDS = frozenset([
+    "connected component", "components", "isolated", "disconnected",
+    "reachability", "wcc", "weakly connected",
+])
+_KCORE_KEYWORDS = frozenset([
+    "kcore", "k-core", "dense subgraph", "cohesive", "core members",
+])
+_TRIANGLE_KEYWORDS = frozenset([
+    "triangle", "triangles", "triadic", "transitive", "triad", "triangle count",
+])
+
+# --- Pathfinding ---
+_PATHFINDING_KEYWORDS = frozenset([
+    "path", "paths", "route", "routes", "shortest", "shortest path",
+    "how to get from", "connect", "connected", "traverse", "hop",
+    "distance between", "steps between", "degrees of separation",
+])
+
+# --- Similarity ---
+_SIMILARITY_KEYWORDS = frozenset([
+    "similar", "similarity", "alike", "resemble", "most like",
+    "closest to", "neighbor similarity", "jaccard", "node similarity",
+])
+
+# --- Link Prediction ---
+_LINK_PREDICTION_KEYWORDS = frozenset([
+    "predict", "likely connect", "potential connection", "might connect",
+    "suggest connection", "recommendation", "common neighbors",
+    "adamic", "resource allocation",
+])
+
+# --- Aggregate / Statistical (no specific GDS algo, uses Cypher aggregates) ---
 _AGGREGATE_KEYWORDS = frozenset([
     "average", "mean", "total", "count", "sum", "top", "bottom",
     "most", "least", "highest", "lowest", "statistics", "how many",
-    "distribution", "percentage", "ratio", "rank",
+    "distribution", "percentage", "ratio", "rank", "ranking",
 ])
+
+# --- General Relationship traversal ---
 _RELATIONSHIP_KEYWORDS = frozenset([
-    "connected", "related", "relationship", "between", "link",
-    "path", "connection", "interact", "associate", "neighbor",
+    "related", "relationship", "between", "link", "interaction",
+    "associate", "association", "neighbor", "neighbors", "connected to",
 ])
+
+# --- General Structural (fallback when no specific algo detected) ---
 _STRUCTURAL_KEYWORDS = frozenset([
-    "hidden", "structural", "cluster", "community", "central",
-    "bridge", "hub", "pattern", "topology", "network",
+    "structural", "topology", "network structure", "hidden",
+    "pattern", "network", "graph structure",
 ])
 
 
 async def router_node(state: ChatState) -> Dict[str, Any]:
-    """Classifies user queries using fast keyword heuristics (no LLM call)."""
+    """
+    Classifies user queries using keyword heuristics and maps to specific
+    Neo4j GDS algorithms. More specific algorithms take priority.
+    """
     question_lower = state["question"].lower()
     tokens = set(question_lower.split())
+    # Also check substrings for multi-word phrases
+    text = question_lower
 
-    if tokens & _STRUCTURAL_KEYWORDS:
-        return {"query_type": "structural", "requires_scout": True}
-    if tokens & _AGGREGATE_KEYWORDS:
-        return {"query_type": "aggregate", "requires_scout": False}
-    if tokens & _RELATIONSHIP_KEYWORDS:
-        return {"query_type": "relationship", "requires_scout": False}
-    return {"query_type": "simple_lookup", "requires_scout": False}
+    def _hits_tokens(kw_set: frozenset) -> bool:
+        return bool(tokens & kw_set)
+
+    def _hits_phrases(phrases) -> bool:
+        return any(ph in text for ph in phrases)
+
+    # --- Pathfinding (highest priority — intent is very explicit) ---
+    if _hits_tokens(_PATHFINDING_KEYWORDS) or _hits_phrases([
+        "shortest path", "how to get from", "degrees of separation", "steps between"
+    ]):
+        return {"query_type": "relationship", "requires_scout": False, "gds_algorithm": "shortest_path"}
+
+    # --- Link prediction ---
+    if _hits_tokens(_LINK_PREDICTION_KEYWORDS) or _hits_phrases([
+        "likely connect", "common neighbors", "predict connection"
+    ]):
+        return {"query_type": "structural", "requires_scout": True, "gds_algorithm": "common_neighbors"}
+
+    # --- Similarity ---
+    if _hits_tokens(_SIMILARITY_KEYWORDS) or _hits_phrases([
+        "most similar", "most alike", "node similarity"
+    ]):
+        return {"query_type": "structural", "requires_scout": True, "gds_algorithm": "node_similarity"}
+
+    # --- Specific centrality algorithms ---
+    if _hits_tokens(_BETWEENNESS_KEYWORDS) or _hits_phrases(["critical node", "most brokering"]):
+        return {"query_type": "structural", "requires_scout": True, "gds_algorithm": "betweenness"}
+    if _hits_tokens(_CLOSENESS_KEYWORDS):
+        return {"query_type": "structural", "requires_scout": True, "gds_algorithm": "closeness"}
+    if _hits_tokens(_HITS_KEYWORDS):
+        return {"query_type": "structural", "requires_scout": True, "gds_algorithm": "hits"}
+    if _hits_tokens(_DEGREE_KEYWORDS) or _hits_phrases(["most connections", "most connected nodes"]):
+        return {"query_type": "aggregate", "requires_scout": False, "gds_algorithm": "degree"}
+    if _hits_tokens(_ARTICLERANK_KEYWORDS):
+        return {"query_type": "structural", "requires_scout": True, "gds_algorithm": "articlerank"}
+    if _hits_tokens(_PAGERANK_KEYWORDS) or _hits_phrases([
+        "most influential", "most important", "key player", "top ranked"
+    ]):
+        return {"query_type": "structural", "requires_scout": True, "gds_algorithm": "pagerank"}
+
+    # --- Community algorithms ---
+    if _hits_tokens(_TRIANGLE_KEYWORDS):
+        return {"query_type": "structural", "requires_scout": True, "gds_algorithm": "triangle_count"}
+    if _hits_tokens(_WCC_KEYWORDS) or _hits_phrases(["connected components", "isolated nodes"]):
+        return {"query_type": "structural", "requires_scout": True, "gds_algorithm": "wcc"}
+    if _hits_tokens(_KCORE_KEYWORDS):
+        return {"query_type": "structural", "requires_scout": True, "gds_algorithm": "kcore"}
+    if _hits_tokens(_LOUVAIN_KEYWORDS) or _hits_phrases(["find communities", "detect clusters"]):
+        return {"query_type": "structural", "requires_scout": True, "gds_algorithm": "louvain"}
+
+    # --- General structural (topology questions, no specific algo) ---
+    if _hits_tokens(_STRUCTURAL_KEYWORDS):
+        return {"query_type": "structural", "requires_scout": True, "gds_algorithm": None}
+
+    # --- Aggregate statistics ---
+    if _hits_tokens(_AGGREGATE_KEYWORDS):
+        return {"query_type": "aggregate", "requires_scout": False, "gds_algorithm": None}
+
+    # --- Relationship traversal ---
+    if _hits_tokens(_RELATIONSHIP_KEYWORDS):
+        return {"query_type": "relationship", "requires_scout": False, "gds_algorithm": None}
+
+    return {"query_type": "simple_lookup", "requires_scout": False, "gds_algorithm": None}
 
 
 # ===== Helpers: Safe parallel Neo4j queries =====
@@ -90,7 +220,7 @@ async def retriever_node(state: ChatState) -> Dict[str, Any]:
     
     # Build scope filter and params
     scope_filter = ""
-    params = {"top_k": 15}
+    params = {"top_k": 20}
     
     if scope:
         s_type = scope.get("type")
@@ -121,8 +251,8 @@ async def retriever_node(state: ChatState) -> Dict[str, Any]:
         RETURN 
             COALESCE(node.id, elementId(node)) as node_id,
             node.name as name,
-            COALESCE(node.description, '') as description,
-            labels(node)[0] as type,
+            COALESCE(node.description, node.text, node.content, '') as description,
+            COALESCE(node.type, labels(node)[0], 'Entity') as type,
             score
         """
     except Exception as e:
@@ -143,10 +273,10 @@ async def retriever_node(state: ChatState) -> Dict[str, Any]:
     RETURN 
         COALESCE(node.id, elementId(node)) as node_id,
         node.name as name,
-        COALESCE(node.description, '') as description,
-        labels(node)[0] as type,
+        COALESCE(node.description, node.text, node.content, '') as description,
+        COALESCE(node.type, labels(node)[0], 'Entity') as type,
         score * 0.85 as score
-    LIMIT 20
+    LIMIT 25
     """
     
     # --- Run BOTH queries in parallel using SEPARATE sessions ---
@@ -199,7 +329,7 @@ async def retriever_node(state: ChatState) -> Dict[str, Any]:
     elapsed = time.perf_counter() - t0
     logger.info(f"[Retriever] {len(vector_results)} vector + {len(lexical_results)} lexical = {len(all_results)} merged results in {elapsed:.2f}s")
     
-    return {"vector_results": all_results[:20]}
+    return {"vector_results": all_results[:30]}
 
 
 # ===== Node 3: Enricher Node =====
@@ -227,13 +357,17 @@ async def enricher_node(state: ChatState) -> Dict[str, Any]:
             neighbor_scope_filter = "AND ($sid IN related.file_ids OR related.file_id = $sid)"
             neighbor_params["sid"] = sid
             
-    # --- Query 1: Direct Neighbors ---
+    # --- Query 1: Direct Neighbors (with description for richer context) ---
     neighbors_query = f"""
     UNWIND $node_ids AS nodeId
     MATCH (n) WHERE n.id = nodeId OR elementId(n) = nodeId
     OPTIONAL MATCH (n)-[r]-(related) WHERE related IS NOT NULL {neighbor_scope_filter}
-    RETURN n.name as source_name, type(r) as rel_type, related.name as related_name
-    LIMIT 30
+    RETURN 
+        n.name as source_name, 
+        type(r) as rel_type, 
+        related.name as related_name,
+        COALESCE(related.description, related.text, related.content, '') as related_desc
+    LIMIT 50
     """
     
     # --- Query 2: Shortest Paths between seed nodes ---
@@ -246,22 +380,29 @@ async def enricher_node(state: ChatState) -> Dict[str, Any]:
     WITH n1, n2 WHERE elementId(n1) < elementId(n2)
     MATCH p = shortestPath((n1)-[*..6]-(n2))
     RETURN [node in nodes(p) | node.name] as names, [rel in relationships(p) | type(rel)] as types
-    LIMIT 8
+    LIMIT 15
     """
     
-    # --- Query 3: Backbone relationship types (fixed: filter on NODE folder_id, not relationship) ---
-    backbone_params = {"sid": None}
+    # --- Query 3: Backbone relationship types ---
+    backbone_params: dict = {}
     if scope and scope.get("type") == "folder":
         backbone_params["sid"] = scope.get("id")
-    
-    backbone_query = """
-    MATCH (a)-[r]->(b)
-    WHERE ($sid IS NULL OR (a.folder_id = $sid AND b.folder_id = $sid))
-    WITH type(r) AS relType, count(*) AS relCount
-    ORDER BY relCount DESC
-    LIMIT 5
-    RETURN relType as relationshipType
-    """
+        backbone_query = """
+        MATCH (a)-[r]->(b)
+        WHERE a.folder_id = $sid AND b.folder_id = $sid
+        WITH type(r) AS relType, count(*) AS relCount
+        ORDER BY relCount DESC
+        LIMIT 8
+        RETURN relType as relationshipType
+        """
+    else:
+        backbone_query = """
+        MATCH (a)-[r]->(b)
+        WITH type(r) AS relType, count(*) AS relCount
+        ORDER BY relCount DESC
+        LIMIT 8
+        RETURN relType as relationshipType
+        """
         
     # --- Run ALL 3 queries in parallel using SEPARATE sessions ---
     neo4j = get_neo4j_driver()
@@ -275,6 +416,7 @@ async def enricher_node(state: ChatState) -> Dict[str, Any]:
             
         nodes = set()
         rels = []
+        neighbor_descriptions: dict = {}
         backbone_types = []
         
         # Neighbors
@@ -283,11 +425,14 @@ async def enricher_node(state: ChatState) -> Dict[str, Any]:
                 source = r.get("source_name")
                 rel = r.get("rel_type")
                 target = r.get("related_name")
+                related_desc = r.get("related_desc", "")
                 if source:
                     nodes.add(source)
                 if target:
                     nodes.add(target)
-                    rels.append(f"{source} -[{rel}]-> {target}")
+                    rels.append(f"{source} → {target} (via {rel})")
+                    if related_desc and target not in neighbor_descriptions:
+                        neighbor_descriptions[target] = related_desc[:300]
         else:
             logger.warning(f"[Enricher] Neighbors query failed: {neighbors_data}")
                     
@@ -297,11 +442,13 @@ async def enricher_node(state: ChatState) -> Dict[str, Any]:
                 names = r.get("names", [])
                 types = r.get("types", [])
                 if names and types:
-                    path_str = ""
+                    path_parts = []
                     for i in range(len(types)):
-                        path_str += f"{names[i]} -[{types[i]}]-> "
-                    path_str += names[-1]
-                    rels.append(f"PATH: {path_str}")
+                        if i < len(names):
+                            path_parts.append(f"{names[i]} →[{types[i]}]→")
+                    if len(names) > len(types):
+                        path_parts.append(names[-1])
+                    rels.append("PATH: " + " ".join(path_parts))
                     for name in names:
                         nodes.add(name)
         else:
@@ -317,16 +464,28 @@ async def enricher_node(state: ChatState) -> Dict[str, Any]:
         logger.error(f"LangGraph Enricher: Context expansion failed: {e}")
         return {"graph_context": "", "backbone_relations": ""}
         
-    # Build text context block
-    context = "Knowledge Base Context:\n"
-    for r in vector_results[:10]:
-        desc = r.get('description', '')[:200]
-        context += f"- {r['name']} [{r.get('type', 'Entity')}]: {desc}\n"
-        
+    # Build rich text context block
+    context_parts = ["=== ENTITIES FROM YOUR KNOWLEDGE BASE ==="]
+    for r in vector_results[:15]:
+        desc = r.get("description", "")[:500]
+        entity_type = r.get("type", "Entity")
+        score = r.get("score", 0)
+        line = f"• [{entity_type}] {r['name']}"
+        if desc:
+            line += f": {desc}"
+        line += f" (relevance: {score:.2f})"
+        context_parts.append(line)
+        # Include neighbor context for this entity if we have it
+        if r["name"] in neighbor_descriptions:
+            nd = neighbor_descriptions[r["name"]][:200]
+            context_parts.append(f"  ↳ Context: {nd}")
+
     if rels:
-        context += "\nRelationships:\n"
-        for rel in rels[:10]:
-            context += f"- {rel}\n"
+        context_parts.append("\n=== RELATIONSHIPS AND CONNECTIONS ===")
+        for rel in rels[:20]:
+            context_parts.append(f"• {rel}")
+
+    context = "\n".join(context_parts)
     
     elapsed = time.perf_counter() - t0
     logger.info(f"[Enricher] {len(nodes)} nodes, {len(rels)} rels, {len(backbone_types)} backbone types in {elapsed:.2f}s")

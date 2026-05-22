@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/+$/, '');
-const API_TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS || 20000);
+const API_TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS || 60000);
 const RETRYABLE_METHODS = new Set(['get', 'head', 'options']);
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 

@@ -222,6 +222,7 @@ const serializeMessage = (message, options = {}) => {
     isWelcome: Boolean(message?.isWelcome),
     isError: Boolean(message?.isError),
     isWebSearch: Boolean(message?.isWebSearch),
+    isGeneralAnswer: Boolean(message?.isGeneralAnswer),
     webSearchPending: Boolean(message?.webSearchPending),
     webSearchSuggested: Boolean(message?.webSearchSuggested),
     webSearchQuery: message?.webSearchQuery || '',
@@ -229,6 +230,11 @@ const serializeMessage = (message, options = {}) => {
     contextSummary: clampText(message?.contextSummary || '', aggressive ? 800 : 2000),
     algorithm: message?.algorithm || null,
   };
+
+  // Persist the original question so assistant messages can show "Replying to: ..."
+  if (message?.originalQuestion) {
+    base.originalQuestion = clampText(message.originalQuestion, 500);
+  }
 
   if (message?.webSearchAnswer) {
     base.webSearchAnswer = clampText(message.webSearchAnswer, aggressive ? 3000 : 9000);
