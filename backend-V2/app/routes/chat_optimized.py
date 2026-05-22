@@ -12,6 +12,7 @@ import uuid
 import time
 from sqlalchemy import text as sa_text
 from pydantic import BaseModel
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 from app.core.security import get_current_user
 from app.services.ai_service import get_ai_service
@@ -81,7 +82,35 @@ async def save_chat_history_row(user_id: str, session_id: Optional[str], role: s
             )
             await session.commit()
             logger.info(f"Saved chat history: {role} in session {db_session_id}")
+            return
     except Exception as e:
+        if role == "web_search":
+            logger.info("Failed to save chat history as 'web_search', retrying as 'assistant' role fallback.")
+            fallback_citations = citations or {}
+            if isinstance(fallback_citations, list):
+                fallback_citations = {"sources": fallback_citations}
+            if isinstance(fallback_citations, dict):
+                fallback_citations["is_web_search_fallback"] = True
+            
+            try:
+                async with get_postgres_session() as session:
+                    await session.execute(
+                        sa_text("""
+                            INSERT INTO neural_nexus.chat_history (user_id, session_id, role, message, citations)
+                            VALUES (:user_id, :session_id, 'assistant', :message, CAST(:citations AS JSONB))
+                        """),
+                        {
+                            "user_id": user_id,
+                            "session_id": db_session_id,
+                            "message": message,
+                            "citations": json.dumps(fallback_citations),
+                        }
+                    )
+                    await session.commit()
+                    logger.info(f"Saved chat history fallback: assistant in session {db_session_id}")
+                    return
+            except Exception as inner_e:
+                logger.warning(f"Failed to save fallback chat history to PostgreSQL: {inner_e}")
         logger.warning(f"Failed to save chat history to PostgreSQL: {e}")
 
 # ===== Helper: Simulated Web Search with Ollama =====
@@ -266,16 +295,47 @@ class CombinedRAGService:
             from app.core.prompts import get_hybrid_rag_system_prompt
             ai = get_ai_service()
             full_answer = ""
+
+            # Build conversation history as LangChain messages (last 10 turns)
+            history_messages = []
+            for h in (history or [])[-10:]:
+                role = h.get("role", "user")
+                content = h.get("content", "")
+                if not content:
+                    continue
+                if role == "user":
+                    history_messages.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    history_messages.append(AIMessage(content=content))
             
             if not graph_context.strip():
-                ans_chunk = "No information found in knowledge base."
-                yield json.dumps({"type": "content", "data": ans_chunk}) + "\n"
-                full_answer = ans_chunk
+                if web_result and web_result.get("answer"):
+                    web_ans = web_result.get("answer")
+                    sys_msg = SystemMessage(content=(
+                        "You are a helpful assistant. The user's query could not be answered "
+                        "using the local database, but web search returned some information. "
+                        "Synthesize a clear, helpful response and note it is from the web."
+                    ))
+                    lc_messages = [sys_msg] + history_messages + [
+                        HumanMessage(content=f"Web search context:\n{web_ans}\n\nQuestion: {question}")
+                    ]
+                    async for chunk in ai.llm.astream(lc_messages):
+                        content = chunk.content if hasattr(chunk, "content") else str(chunk)
+                        if content:
+                            yield json.dumps({"type": "content", "data": content}) + "\n"
+                            full_answer += content
+                else:
+                    ans_chunk = "I couldn't find relevant information in your knowledge base for this question. You can try enabling web search, or upload documents related to this topic."
+                    yield json.dumps({"type": "content", "data": ans_chunk}) + "\n"
+                    full_answer = ans_chunk
             else:
+                # System prompt already contains graph_context — don't duplicate it
                 system_prompt = get_hybrid_rag_system_prompt(graph_context=graph_context, backbone=backbone)
-                user_prompt = f"{graph_context}\n\nQuestion: {question}"
+                lc_messages = [SystemMessage(content=system_prompt)] + history_messages + [
+                    HumanMessage(content=question)
+                ]
                 
-                async for chunk in ai.llm.astream(user_prompt):
+                async for chunk in ai.llm.astream(lc_messages):
                     content = chunk.content if hasattr(chunk, "content") else str(chunk)
                     if content:
                         yield json.dumps({"type": "content", "data": content}) + "\n"
@@ -317,6 +377,96 @@ def get_rag_service() -> CombinedRAGService:
 
 def invalidate_rag_caches():
     logger.info("Invalidating RAG schema/dynamic caches.")
+
+# ===== Primary Chat Routes on working router: /chat-optimized/... =====
+@router.post("/stream-answer")
+async def stream_answer_primary(
+    request: ChatRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = current_user.get("id") or current_user.get("sub")
+    return StreamingResponse(
+        _rag_service.stream_answer(
+            question=request.question,
+            folder_id=request.folder_id,
+            history=request.history,
+            user_id=user_id,
+            session_id=request.session_id,
+            web_search=request.web_search,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+            "Transfer-Encoding": "chunked",
+        }
+    )
+
+@router.post("/web-search")
+async def web_search_primary(
+    request: WebSearchRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = current_user.get("id") or current_user.get("sub")
+    res = await run_simulated_web_search(request.question)
+    sources = res.get("sources", [])
+    await save_chat_history_row(user_id, request.session_id, "web_search", res.get("answer", ""), sources)
+    return {
+        "answer": res.get("answer", ""),
+        "source": "web_search",
+        "grounding_metadata": {
+            "search_entry_point": None,
+            "grounding_chunks": sources
+        }
+    }
+
+@router.post("/general-answer")
+async def general_answer_primary(
+    request: GeneralAnswerRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    prompt = (
+        f"You are a knowledgeable assistant. The user asked a question that had no matching data "
+        f"in their knowledge graph database. They have now requested a general knowledge answer.\n\n"
+        f"Question: {request.question}\n\n"
+        f"Provide a helpful, accurate answer based on your general training knowledge. "
+        f"Start your response with: '⚠️ **General Knowledge Answer** (not from your database):\\n\\n' "
+        f"Then answer the question thoroughly but concisely."
+    )
+
+    async def stream_general():
+        ai = get_ai_service()
+        async for chunk in ai.llm.astream(prompt):
+            content = chunk.content if hasattr(chunk, "content") else str(chunk)
+            if content:
+                yield json.dumps({"type": "content", "data": content}) + "\n"
+        yield json.dumps({"type": "done"}) + "\n"
+
+    user_id = current_user.get("id") or current_user.get("sub")
+
+    async def stream_and_save():
+        full_text = ""
+        async for item in stream_general():
+            yield item
+            try:
+                parsed = json.loads(item.strip())
+                if parsed.get("type") == "content":
+                    full_text += parsed["data"]
+            except Exception:
+                continue
+        await save_chat_history_row(user_id, request.session_id, "user", request.question)
+        await save_chat_history_row(user_id, request.session_id, "assistant", full_text)
+
+    return StreamingResponse(
+        stream_and_save(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 # ===== Router: /chat-optimized/query-stream =====
 @router.post("/query-stream")

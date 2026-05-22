@@ -1,7 +1,10 @@
 import os
 import logging
 from typing import Optional
-from faster_whisper import WhisperModel
+try:
+    from faster_whisper import WhisperModel
+except ImportError:
+    WhisperModel = None
 import tempfile
 from app.core.config import settings
 

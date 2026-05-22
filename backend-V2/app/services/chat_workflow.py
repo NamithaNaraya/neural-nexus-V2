@@ -43,45 +43,34 @@ class ChatState(TypedDict):
     error: Optional[str]
 
 
-# ===== Node 1: Router Node =====
+# ===== Node 1: Router Node (Fast Heuristic) =====
+_AGGREGATE_KEYWORDS = frozenset([
+    "average", "mean", "total", "count", "sum", "top", "bottom",
+    "most", "least", "highest", "lowest", "statistics", "how many",
+    "distribution", "percentage", "ratio", "rank",
+])
+_RELATIONSHIP_KEYWORDS = frozenset([
+    "connected", "related", "relationship", "between", "link",
+    "path", "connection", "interact", "associate", "neighbor",
+])
+_STRUCTURAL_KEYWORDS = frozenset([
+    "hidden", "structural", "cluster", "community", "central",
+    "bridge", "hub", "pattern", "topology", "network",
+])
+
+
 async def router_node(state: ChatState) -> Dict[str, Any]:
-    """Classifies user queries to determine routing path."""
-    question = state["question"]
-    classification_prompt = f"""
-    Classify this user question as one of:
-    1. "simple_lookup" - Direct entity/attribute lookup (e.g., "Who is John?", "What is the value?")
-    2. "relationship" - Finding connections (e.g., "How are X and Y connected?")
-    3. "aggregate" - Statistical/analytical (e.g., "What's the average?", "Top 10 by...")
-    4. "structural" - Complex graph patterns (e.g., "Hidden connections", "Structural analysis")
-    
-    Question: {question}
-    
-    Respond with JSON:
-    {{
-        "query_type": "simple_lookup" | "relationship" | "aggregate" | "structural",
-        "requires_scout": false | true,
-        "confidence": 0.0-1.0,
-        "reasoning": "brief explanation"
-    }}
-    """
-    
-    ai = get_ai_service()
-    try:
-        result = await ai.chat_json([{
-            "role": "user",
-            "content": classification_prompt
-        }])
-        
-        return {
-            "query_type": result.get("query_type", "simple_lookup"),
-            "requires_scout": result.get("requires_scout", False)
-        }
-    except Exception as e:
-        logger.warning(f"LangGraph Router: Classification failed ({e}), defaulting to simple_lookup")
-        return {
-            "query_type": "simple_lookup",
-            "requires_scout": False
-        }
+    """Classifies user queries using fast keyword heuristics (no LLM call)."""
+    question_lower = state["question"].lower()
+    tokens = set(question_lower.split())
+
+    if tokens & _STRUCTURAL_KEYWORDS:
+        return {"query_type": "structural", "requires_scout": True}
+    if tokens & _AGGREGATE_KEYWORDS:
+        return {"query_type": "aggregate", "requires_scout": False}
+    if tokens & _RELATIONSHIP_KEYWORDS:
+        return {"query_type": "relationship", "requires_scout": False}
+    return {"query_type": "simple_lookup", "requires_scout": False}
 
 
 # ===== Node 2: Retriever Node =====
@@ -320,21 +309,26 @@ async def synthesizer_node(state: ChatState) -> Dict[str, Any]:
     graph_context = state.get("graph_context", "")
     backbone = state.get("backbone_relations", "")
     question = state["question"]
+    history = state.get("history", [])
     
     if not graph_context.strip():
         return {
-            "answer": "No information found in knowledge base.",
+            "answer": "I couldn't find relevant information in your knowledge base for this question.",
             "citations": [],
             "related_nodes": []
         }
         
+    # System prompt already contains graph_context — don't duplicate it
     system_prompt = get_hybrid_rag_system_prompt(graph_context=graph_context, backbone=backbone)
-    user_prompt = f"{graph_context}\n\nQuestion: {question}"
     
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt}
-    ]
+    # Build messages: system + history (last 10 turns) + current question
+    messages = [{"role": "system", "content": system_prompt}]
+    for h in (history or [])[-10:]:
+        role = h.get("role", "user")
+        content = h.get("content", "")
+        if content and role in ("user", "assistant"):
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": question})
     
     ai = get_ai_service()
     try:
@@ -490,19 +484,27 @@ class LangGraphRAGService:
             backbone = state.get("backbone_relations", "")
             
             if not graph_context.strip():
-                yield "No information found in knowledge base."
+                yield "I couldn't find relevant information in your knowledge base for this question."
                 return
                 
             system_prompt = get_hybrid_rag_system_prompt(graph_context=graph_context, backbone=backbone)
-            user_prompt = f"{graph_context}\n\nQuestion: {question}"
             
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
+            # Build LangChain messages: system + history + question
+            from langchain_core.messages import HumanMessage, SystemMessage, AIMessage as AIM
+            lc_messages = [SystemMessage(content=system_prompt)]
+            for h in (history or [])[-10:]:
+                role = h.get("role", "user")
+                content = h.get("content", "")
+                if not content:
+                    continue
+                if role == "user":
+                    lc_messages.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    lc_messages.append(AIM(content=content))
+            lc_messages.append(HumanMessage(content=question))
             
             ai = get_ai_service()
-            async for chunk in ai.llm.astream(user_prompt):
+            async for chunk in ai.llm.astream(lc_messages):
                 # Handle ChatOllama response chunk format which might be AIMessageChunk or string
                 if hasattr(chunk, "content"):
                     yield chunk.content

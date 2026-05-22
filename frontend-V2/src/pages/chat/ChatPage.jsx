@@ -646,7 +646,7 @@ export default function ChatPage() {
     }
     setLoading(true);
     try {
-      const response = await api.post('/combined-chat/web-search', { question: searchQuery, context_hint: fallbackContext, session_id: workspace.currentSessionId || null });
+      const response = await api.post('/chat-optimized/web-search', { question: searchQuery, context_hint: fallbackContext, session_id: workspace.currentSessionId || null });
       const fullAnswer = response.data?.answer || response.data?.response || 'No findings available.';
       const sources = normalizeWebSearchSources(response.data?.grounding_metadata);
       if (typeof messageIndex === 'number') {
@@ -666,7 +666,7 @@ export default function ChatPage() {
     }
     try {
       const token = localStorage.getItem('neural_nexus_token');
-      const response = await fetch('/api/v1/combined-chat/general-answer', {
+      const response = await fetch('/api/v1/chat-optimized/general-answer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ question, session_id: workspace.currentSessionId || null }),
@@ -744,7 +744,17 @@ export default function ChatPage() {
               ...session,
               title: isUntitledSession(session, currentFolder?.name) ? nextSessionTitle : session.title,
               folderId: selectedFolderId ? String(selectedFolderId) : session.folderId,
-              messages: [...session.messages, { role: 'user', content: userMessage }, { role: 'assistant', content: '', isStreaming: true, originalQuestion: userMessage }],
+              messages: [
+                ...session.messages,
+                { role: 'user', content: userMessage },
+                {
+                  role: 'assistant',
+                  content: '',
+                  isStreaming: true,
+                  originalQuestion: userMessage,
+                  ...(isWebSearchEnabled ? { isWebSearch: true, isStreamingWebSearch: true, webSearchPending: true } : {})
+                }
+              ],
               updatedAt: Date.now(),
             }
           : session
@@ -763,6 +773,11 @@ export default function ChatPage() {
         intent: null,
         contextSummary: '',
         dataGrounding: null,
+        isWebSearch: undefined,
+        webSearchPending: undefined,
+        webSearchAnswer: undefined,
+        webSearchSources: undefined,
+        isStreamingWebSearch: undefined,
       };
       const applyStreamMeta = (partial) => {
         Object.assign(streamMeta, partial || {});
@@ -779,6 +794,11 @@ export default function ChatPage() {
             ...(streamMeta.intent ? { intent: streamMeta.intent } : {}),
             ...(streamMeta.contextSummary ? { contextSummary: streamMeta.contextSummary } : {}),
             ...(streamMeta.dataGrounding !== null ? { dataGrounding: streamMeta.dataGrounding } : {}),
+            ...(streamMeta.isWebSearch !== undefined ? { isWebSearch: streamMeta.isWebSearch } : {}),
+            ...(streamMeta.webSearchPending !== undefined ? { webSearchPending: streamMeta.webSearchPending } : {}),
+            ...(streamMeta.webSearchAnswer !== undefined ? { webSearchAnswer: streamMeta.webSearchAnswer } : {}),
+            ...(streamMeta.webSearchSources !== undefined ? { webSearchSources: streamMeta.webSearchSources } : {}),
+            ...(streamMeta.isStreamingWebSearch !== undefined ? { isStreamingWebSearch: streamMeta.isStreamingWebSearch } : {}),
           };
           return {
             ...prev,
@@ -815,10 +835,8 @@ export default function ChatPage() {
 
       const activeMessages = messages.filter(m => !m.isWelcome).map(m => ({ role: m.role, content: m.content }));
       const token = localStorage.getItem('neural_nexus_token');
-      const ws = wsRef.current;
-      const canUseWs = ws && ws.readyState === WebSocket.OPEN;
       const streamViaHttp = async () => {
-        const response = await fetch('/api/v1/combined-chat/stream-answer', {
+        const response = await fetch('/api/v1/chat-optimized/stream-answer', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
           body: JSON.stringify({
@@ -858,54 +876,26 @@ export default function ChatPage() {
                 applyStreamMeta({
                   dataGrounding: chunk?.data || null,
                 });
+              } else if (chunk.type === 'web_search_result') {
+                applyStreamMeta({
+                  isWebSearch: true,
+                  webSearchPending: false,
+                  isStreamingWebSearch: false,
+                  webSearchAnswer: chunk?.data?.answer || '',
+                  webSearchSources: normalizeWebSearchSources(chunk?.data?.sources),
+                });
               }
             } catch { /* parse fail */ }
           }
         }
       };
 
-      if (canUseWs) {
-        const requestId =
-          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-            ? crypto.randomUUID()
-            : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        wsChunkCountRef.current = 0;
-        wsLastErrorRef.current = '';
-        wsRequestIdRef.current = requestId;
-        wsSessionIdRef.current = activeSessionId;
-        ws.send(
-          JSON.stringify({
-            type: 'chat_stream',
-            request_id: requestId,
-            question: userMessage,
-            folder_id: selectedFolderId || null,
-            session_id: activeSessionId || null,
-            history: activeMessages.slice(-CHAT_HISTORY_SEND_WINDOW),
-            web_search: isWebSearchEnabled,
-          })
-        );
+      await streamViaHttp();
 
-        // Wait until ws handler marks this request as done/error.
-        const startedAt = Date.now();
-        while (wsRequestIdRef.current === requestId) {
-          await new Promise((r) => setTimeout(r, 40));
-          // Safety: avoid hanging if server doesn't reply.
-          if (Date.now() - startedAt > 180000) {
-            throw new Error('WebSocket stream timeout');
-          }
-        }
-        if (wsLastErrorRef.current || wsChunkCountRef.current === 0) {
-          await streamViaHttp();
-        }
-      } else {
-        await streamViaHttp();
-      }
-      // Cancel any pending flush timer FIRST to prevent double-flush race
       if (streamFlushTimerRef.current) {
         clearTimeout(streamFlushTimerRef.current);
         streamFlushTimerRef.current = null;
       }
-      // Final flush — only if there's actually pending content
       const finalPending = streamBufferRef.current;
       if (finalPending) {
         streamBufferRef.current = '';
