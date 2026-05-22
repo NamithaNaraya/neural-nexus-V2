@@ -7,6 +7,7 @@ import { GlobalFolderProvider } from './contexts/GlobalFolderContext';
 import { PredictedLinksProvider } from './contexts/PredictedLinksContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { ChakraAppProvider } from './providers/ChakraAppProvider';
+import { StoreProvider } from './providers/StoreProvider';
 import { pageLoaders } from './pages/pageLoaders';
 import { RoutePageSkeleton } from './components/skeletons/RoutePageSkeleton';
 
@@ -112,17 +113,19 @@ function AppContent() {
         path="/*"
         element={
           <ProtectedRoute>
-            <SidebarProvider>
-              <GlobalFolderProvider>
-                <PredictedLinksProvider>
-                  <AppLayout>
-                    <Suspense fallback={protectedFallback}>
-                      <AnimatedRoutes />
-                    </Suspense>
-                  </AppLayout>
-                </PredictedLinksProvider>
-              </GlobalFolderProvider>
-            </SidebarProvider>
+            <StoreProvider>
+              <SidebarProvider>
+                <GlobalFolderProvider>
+                  <PredictedLinksProvider>
+                    <AppLayout>
+                      <Suspense fallback={protectedFallback}>
+                        <AnimatedRoutes />
+                      </Suspense>
+                    </AppLayout>
+                  </PredictedLinksProvider>
+                </GlobalFolderProvider>
+              </SidebarProvider>
+            </StoreProvider>
           </ProtectedRoute>
         }
       />

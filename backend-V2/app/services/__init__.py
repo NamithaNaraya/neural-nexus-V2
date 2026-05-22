@@ -1,5 +1,5 @@
 # Services Package
-# Core business logic (AI processing, Azure, Neo4j interactions)
+# Core business logic (AI processing, Neo4j interactions)
 
 from .ai_service import AIService, get_ai_service, get_ollama_service
 
@@ -7,7 +7,6 @@ from .ai_service import AIService, get_ai_service, get_ollama_service
 from .graph_layout import GraphLayoutService, get_layout_service
 
 # Phase 6: Advanced Intelligence
-from .hybrid_rag import HybridRAGService, get_rag_service
 from .cluster_comparison import ClusterComparisonService, get_comparison_service
 from .blind_spot_discovery import BlindSpotDiscovery, get_discovery_service
 from .analytics_export import AnalyticsExportService, get_export_service
@@ -18,13 +17,6 @@ from .permission_service import (
     PermissionLevel,
     ContextualSearchLock,
     get_permission_service,
-)
-from .deletion_service import (
-    DeletionService,
-    DeletionJob,
-    DeletionStatus,
-    ReferenceCounter,
-    get_deletion_service,
 )
 from .health_service import (
     SystemHealthService,
@@ -43,8 +35,6 @@ __all__ = [
     "GraphLayoutService",
     "get_layout_service",
     # Phase 6
-    "HybridRAGService",
-    "get_rag_service",
     "ClusterComparisonService",
     "get_comparison_service",
     "BlindSpotDiscovery",
@@ -56,11 +46,6 @@ __all__ = [
     "PermissionLevel",
     "ContextualSearchLock",
     "get_permission_service",
-    "DeletionService",
-    "DeletionJob",
-    "DeletionStatus",
-    "ReferenceCounter",
-    "get_deletion_service",
     "SystemHealthService",
     "HealthStatus",
     "ServiceStatus",

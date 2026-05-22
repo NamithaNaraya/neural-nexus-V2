@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class STTService:
     _instance: Optional['STTService'] = None
-    _model: Optional[WhisperModel] = None
+    _model = None
 
     def __new__(cls):
         if cls._instance is None:
@@ -23,7 +23,17 @@ class STTService:
         # Lazy initialization to avoid loading model on every import
         pass
 
-    def _get_model(self) -> WhisperModel:
+    @staticmethod
+    def is_available() -> bool:
+        """Check if the STT dependency (faster-whisper) is installed."""
+        return WhisperModel is not None
+
+    def _get_model(self):
+        if WhisperModel is None:
+            raise RuntimeError(
+                "faster-whisper is not installed. "
+                "Install it with: pip install faster-whisper"
+            )
         if self._model is None:
             model_name = settings.WHISPER_MODEL
             logger.info(f"🎙️ Loading Whisper model ({model_name})...")

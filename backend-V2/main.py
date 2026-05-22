@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
-from app.routes import health, auth, folders, files, upload, graph, query, analytics, sse, websocket, deletion, dashboard, reasoning, browse, analytics_chat, herb, stt
+from app.routes import health, auth, folders, files, upload, graph, query, analytics, websocket, browse, stt
 from app.routes import chat_optimized  # NEW: Optimized streaming chat
 from app.routes import weights as weight_routes
 from app.routes.ml import ml_routes
@@ -110,9 +110,12 @@ async def lifespan(app: FastAPI):
     try:
         from app.services.stt_service import get_stt_service
         stt = get_stt_service()
-        # Triggering _get_model() in a background thread to prevent blocking the main server startup
-        asyncio.create_task(asyncio.to_thread(stt._get_model))
-        logger.info("🎙️ STT Engine initializing in background...")
+        if stt.is_available():
+            # Triggering _get_model() in a background thread to prevent blocking the main server startup
+            asyncio.create_task(asyncio.to_thread(stt._get_model))
+            logger.info("🎙️ STT Engine initializing in background...")
+        else:
+            logger.warning("⚠️ STT disabled — faster-whisper not installed (pip install faster-whisper)")
     except Exception as e:
         logger.error(f"❌ STT initialization failed: {e}")
 
@@ -189,18 +192,11 @@ app.include_router(upload.router, prefix="/api/v1", tags=["Upload"])
 app.include_router(graph.router, prefix="/api/v1/graph", tags=["Graph"])
 app.include_router(query.router, prefix="/api/v1", tags=["Query"])
 app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["Analytics"])
-app.include_router(sse.router, prefix="/api/v1/sse", tags=["SSE"])
 app.include_router(websocket.router, prefix="/api/v1/ws", tags=["WebSocket"])
-app.include_router(deletion.router, prefix="/api/v1", tags=["Deletion"])
-app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["Dashboard"])
-app.include_router(reasoning.router, prefix="/api/v1", tags=["Reasoning"])
 app.include_router(browse.router, prefix="/api/v1/browse", tags=["Browse"])
 app.include_router(ml_routes.router, prefix="/api/v1/ml", tags=["Machine Learning"])
-app.include_router(analytics_chat.router, prefix="/api/v1/analytics-chat", tags=["Analytic Chat"])
-app.include_router(chat_optimized.router, prefix="/api/v1", tags=["Chat Optimized"])  # NEW: Fast streaming chat
-app.include_router(chat_optimized.combined_router, prefix="/api/v1", tags=["Combined Chat"])
+app.include_router(chat_optimized.router, prefix="/api/v1", tags=["Chat"])
 app.include_router(stt.router, prefix="/api/v1/stt", tags=["Speech to Text"])
-app.include_router(herb.router, prefix="/api/v1/graph", tags=["Herb Domain"])
 app.include_router(weight_routes.router, prefix="/api/v1/weights", tags=["Weight Config"])
 
 

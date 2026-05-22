@@ -9,12 +9,7 @@ from app.routes import upload
 from app.routes import graph
 from app.routes import query
 from app.routes import analytics
-from app.routes import sse
 from app.routes import websocket
-from app.routes import deletion
-from app.routes import herb
-
-from app.routes import reasoning
 
 __all__ = [
     "health",
@@ -25,10 +20,6 @@ __all__ = [
     "graph",
     "query",
     "analytics",
-    "sse",
     "websocket",
-    "deletion",
-    "reasoning",
-    "herb",
 ]
 
