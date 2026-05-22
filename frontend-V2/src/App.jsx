@@ -62,74 +62,255 @@ function PageTransition({ children }) {
   );
 }
 
-function AnimatedRoutes() {
-  const location = useLocation();
-  const routeScopeKey = (() => {
-    const first = location.pathname.split('/').filter(Boolean)[0];
-    return first || 'root';
-  })();
-  return (
-    <AnimatePresence mode="wait" initial={false}>
-      <Routes location={location} key={routeScopeKey}>
-        <Route path="/" element={<Navigate to="/folders" replace />} />
-        <Route path="/folders" element={<PageTransition><FoldersPage /></PageTransition>} />
-        <Route path="/graph/*" element={<PageTransition><GraphPage /></PageTransition>} />
-        <Route path="/visualize/*" element={<PageTransition><VisualizeDataPage /></PageTransition>} />
-        <Route path="/chat" element={<PageTransition><ChatPage /></PageTransition>} />
-        <Route path="/upload" element={<PageTransition><UploadPage /></PageTransition>} />
-        <Route path="/browse" element={<PageTransition><BrowsePage /></PageTransition>} />
-        <Route path="/ml-prediction" element={<PageTransition><MLPredictionPage /></PageTransition>} />
-        <Route path="/analytics" element={<PageTransition><AnalyticsPage /></PageTransition>} />
-        <Route path="/settings" element={<PageTransition><SettingsPage /></PageTransition>} />
-        <Route path="/help" element={<PageTransition><HelpPage /></PageTransition>} />
-        <Route path="/canvas" element={<PageTransition><CanvasPage /></PageTransition>} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </AnimatePresence>
-  );
-}
-
 function AppContent() {
   const location = useLocation();
   const protectedFallback = <RoutePageSkeleton pathname={location.pathname} />;
 
   return (
-    <Routes>
-      <Route
-        path="/"
-        element={<HomeRoute />}
-      />
-      <Route
-        path="/login"
-        element={
-          <PublicRoute>
-            <Suspense fallback={<RoutePageSkeleton pathname="/login" />}>
-              <LoginPage />
-            </Suspense>
-          </PublicRoute>
-        }
-      />
-      <Route
-        path="/*"
-        element={
-          <ProtectedRoute>
-            <StoreProvider>
-              <SidebarProvider>
-                <GlobalFolderProvider>
-                  <PredictedLinksProvider>
-                    <AppLayout>
-                      <Suspense fallback={protectedFallback}>
-                        <AnimatedRoutes />
-                      </Suspense>
-                    </AppLayout>
-                  </PredictedLinksProvider>
-                </GlobalFolderProvider>
-              </SidebarProvider>
-            </StoreProvider>
-          </ProtectedRoute>
-        }
-      />
-    </Routes>
+    <AnimatePresence mode="wait" initial={false}>
+      <Routes location={location}>
+        {/* Public Routes */}
+        <Route
+          path="/"
+          element={<HomeRoute />}
+        />
+        <Route
+          path="/login"
+          element={
+            <PublicRoute>
+              <Suspense fallback={<RoutePageSkeleton pathname="/login" />}>
+                <LoginPage />
+              </Suspense>
+            </PublicRoute>
+          }
+        />
+
+        {/* Protected Routes */}
+        <Route
+          path="/folders"
+          element={
+            <ProtectedRoute>
+              <StoreProvider>
+                <SidebarProvider>
+                  <GlobalFolderProvider>
+                    <PredictedLinksProvider>
+                      <AppLayout>
+                        <Suspense fallback={protectedFallback}>
+                          <PageTransition><FoldersPage /></PageTransition>
+                        </Suspense>
+                      </AppLayout>
+                    </PredictedLinksProvider>
+                  </GlobalFolderProvider>
+                </SidebarProvider>
+              </StoreProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/graph/*"
+          element={
+            <ProtectedRoute>
+              <StoreProvider>
+                <SidebarProvider>
+                  <GlobalFolderProvider>
+                    <PredictedLinksProvider>
+                      <AppLayout>
+                        <Suspense fallback={protectedFallback}>
+                          <PageTransition><GraphPage /></PageTransition>
+                        </Suspense>
+                      </AppLayout>
+                    </PredictedLinksProvider>
+                  </GlobalFolderProvider>
+                </SidebarProvider>
+              </StoreProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/visualize/*"
+          element={
+            <ProtectedRoute>
+              <StoreProvider>
+                <SidebarProvider>
+                  <GlobalFolderProvider>
+                    <PredictedLinksProvider>
+                      <AppLayout>
+                        <Suspense fallback={protectedFallback}>
+                          <PageTransition><VisualizeDataPage /></PageTransition>
+                        </Suspense>
+                      </AppLayout>
+                    </PredictedLinksProvider>
+                  </GlobalFolderProvider>
+                </SidebarProvider>
+              </StoreProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/chat"
+          element={
+            <ProtectedRoute>
+              <StoreProvider>
+                <SidebarProvider>
+                  <GlobalFolderProvider>
+                    <PredictedLinksProvider>
+                      <AppLayout>
+                        <Suspense fallback={protectedFallback}>
+                          <PageTransition><ChatPage /></PageTransition>
+                        </Suspense>
+                      </AppLayout>
+                    </PredictedLinksProvider>
+                  </GlobalFolderProvider>
+                </SidebarProvider>
+              </StoreProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/upload"
+          element={
+            <ProtectedRoute>
+              <StoreProvider>
+                <SidebarProvider>
+                  <GlobalFolderProvider>
+                    <PredictedLinksProvider>
+                      <AppLayout>
+                        <Suspense fallback={protectedFallback}>
+                          <PageTransition><UploadPage /></PageTransition>
+                        </Suspense>
+                      </AppLayout>
+                    </PredictedLinksProvider>
+                  </GlobalFolderProvider>
+                </SidebarProvider>
+              </StoreProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/browse"
+          element={
+            <ProtectedRoute>
+              <StoreProvider>
+                <SidebarProvider>
+                  <GlobalFolderProvider>
+                    <PredictedLinksProvider>
+                      <AppLayout>
+                        <Suspense fallback={protectedFallback}>
+                          <PageTransition><BrowsePage /></PageTransition>
+                        </Suspense>
+                      </AppLayout>
+                    </PredictedLinksProvider>
+                  </GlobalFolderProvider>
+                </SidebarProvider>
+              </StoreProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/ml-prediction"
+          element={
+            <ProtectedRoute>
+              <StoreProvider>
+                <SidebarProvider>
+                  <GlobalFolderProvider>
+                    <PredictedLinksProvider>
+                      <AppLayout>
+                        <Suspense fallback={protectedFallback}>
+                          <PageTransition><MLPredictionPage /></PageTransition>
+                        </Suspense>
+                      </AppLayout>
+                    </PredictedLinksProvider>
+                  </GlobalFolderProvider>
+                </SidebarProvider>
+              </StoreProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/analytics"
+          element={
+            <ProtectedRoute>
+              <StoreProvider>
+                <SidebarProvider>
+                  <GlobalFolderProvider>
+                    <PredictedLinksProvider>
+                      <AppLayout>
+                        <Suspense fallback={protectedFallback}>
+                          <PageTransition><AnalyticsPage /></PageTransition>
+                        </Suspense>
+                      </AppLayout>
+                    </PredictedLinksProvider>
+                  </GlobalFolderProvider>
+                </SidebarProvider>
+              </StoreProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <ProtectedRoute>
+              <StoreProvider>
+                <SidebarProvider>
+                  <GlobalFolderProvider>
+                    <PredictedLinksProvider>
+                      <AppLayout>
+                        <Suspense fallback={protectedFallback}>
+                          <PageTransition><SettingsPage /></PageTransition>
+                        </Suspense>
+                      </AppLayout>
+                    </PredictedLinksProvider>
+                  </GlobalFolderProvider>
+                </SidebarProvider>
+              </StoreProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/help"
+          element={
+            <ProtectedRoute>
+              <StoreProvider>
+                <SidebarProvider>
+                  <GlobalFolderProvider>
+                    <PredictedLinksProvider>
+                      <AppLayout>
+                        <Suspense fallback={protectedFallback}>
+                          <PageTransition><HelpPage /></PageTransition>
+                        </Suspense>
+                      </AppLayout>
+                    </PredictedLinksProvider>
+                  </GlobalFolderProvider>
+                </SidebarProvider>
+              </StoreProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/canvas"
+          element={
+            <ProtectedRoute>
+              <StoreProvider>
+                <SidebarProvider>
+                  <GlobalFolderProvider>
+                    <PredictedLinksProvider>
+                      <AppLayout>
+                        <Suspense fallback={protectedFallback}>
+                          <PageTransition><CanvasPage /></PageTransition>
+                        </Suspense>
+                      </AppLayout>
+                    </PredictedLinksProvider>
+                  </GlobalFolderProvider>
+                </SidebarProvider>
+              </StoreProvider>
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Catch-all */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </AnimatePresence>
   );
 }
 
