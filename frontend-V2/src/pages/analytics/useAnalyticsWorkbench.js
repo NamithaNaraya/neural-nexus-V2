@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useSelector } from 'react-redux';
 import { graphService } from '../../services/graphService';
 import { analyticsService } from '../../services/analyticsService';
 import { weightsService } from '../../services/weightsService';
@@ -14,17 +16,16 @@ function buildInitialParams(algorithm) {
 
 export function useAnalyticsWorkbench() {
   const { selectedFolderId: folderId, currentFolder } = useGlobalFolder();
-  const [folderNodes, setFolderNodes] = useState([]);
-  const [folderLinks, setFolderLinks] = useState([]);
-  const [graphStats, setGraphStats] = useState({ nodes: 0, links: 0 });
+  const queryClient = useQueryClient();
+  
+  // 1. Redux subscription to graph changes (such as node additions/deletions)
+  const refreshToken = useSelector((state) => state.graph?.refreshToken || 0);
+
+  // 2. Workbench state definitions
   const [selectedNodes, setSelectedNodes] = useState([]);
   const [selectedAlgorithmId, setSelectedAlgorithmId] = useState(ALGORITHM_CATALOG[0].id);
   const [algorithmParams, setAlgorithmParams] = useState(buildInitialParams(ALGORITHM_CATALOG[0]));
-  const [loadingNodes, setLoadingNodes] = useState(true);
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState(null);
   const [error, setError] = useState('');
-  const [relationshipProperties, setRelationshipProperties] = useState([]);
   const [weightingEnabled, setWeightingEnabled] = useState(false);
   const [weightFormulaType, setWeightFormulaType] = useState('property');
   const [weightProperty, setWeightProperty] = useState('');
@@ -35,65 +36,78 @@ export function useAnalyticsWorkbench() {
   const [weightPrimaryCoefficient, setWeightPrimaryCoefficient] = useState(1);
   const [weightSecondaryCoefficient, setWeightSecondaryCoefficient] = useState(0.5);
   const [runFullFolder, setRunFullFolder] = useState(true);
+  const [activeRunParams, setActiveRunParams] = useState(null);
 
+  // Invalidate queries when graph changes (via Redux or custom CRUD event)
   useEffect(() => {
-    let ignore = false;
+    const handleInvalidate = () => {
+      queryClient.invalidateQueries({ queryKey: ['analytics'] });
+      queryClient.invalidateQueries({ queryKey: ['graph'] });
+    };
 
-    async function loadNodes() {
-      if (!folderId) {
-        setFolderNodes([]);
-        setFolderLinks([]);
-        setGraphStats({ nodes: 0, links: 0 });
-        setRelationshipProperties([]);
-        setSelectedNodes([]);
-        setLoadingNodes(false);
-        return;
-      }
-
-      setLoadingNodes(true);
-      try {
-        const [data, discoveredProperties] = await Promise.all([
-          graphService.getFolder(folderId, 800),
-          weightsService.discoverProperties(folderId),
-        ]);
-        if (ignore) return;
-
-        const nodes = Array.isArray(data?.nodes) ? data.nodes : [];
-        const links = Array.isArray(data?.links) ? data.links : [];
-        const relProps = Object.keys(discoveredProperties?.relationship_properties || {});
-
-        setFolderNodes(nodes);
-        setFolderLinks(links);
-        setGraphStats({
-          nodes: Number(data?.total_nodes || nodes.length || 0),
-          links: Number(data?.total_links || links.length || 0),
-        });
-        setRelationshipProperties(relProps);
-        setWeightProperty(relProps[0] || '');
-        setWeightNumerator(relProps[0] || '');
-        setWeightDenominator(relProps[1] || relProps[0] || '');
-        setWeightPrimaryProperty(relProps[0] || '');
-        setWeightSecondaryProperty(relProps[1] || relProps[0] || '');
-        setSelectedNodes((current) => current.filter((id) => nodes.some((node) => node.id === id)));
-      } catch (err) {
-        console.error('Failed to load folder nodes:', err);
-        if (!ignore) {
-          setFolderNodes([]);
-          setFolderLinks([]);
-          setGraphStats({ nodes: 0, links: 0 });
-          setRelationshipProperties([]);
-          setSelectedNodes([]);
-        }
-      } finally {
-        if (!ignore) setLoadingNodes(false);
-      }
+    if (refreshToken > 0) {
+      handleInvalidate();
     }
 
-    loadNodes();
+    window.addEventListener('nnv2:graph-crud', handleInvalidate);
     return () => {
-      ignore = true;
+      window.removeEventListener('nnv2:graph-crud', handleInvalidate);
     };
+  }, [refreshToken, queryClient]);
+
+  // Reset active run parameters when folder changes
+  useEffect(() => {
+    setActiveRunParams(null);
+    setSelectedNodes([]);
+    setError('');
   }, [folderId]);
+
+  // 3. TanStack Query for folder graph data
+  const { data: graphData, isFetching: loadingNodes } = useQuery({
+    queryKey: ['graph', 'folder', folderId, 800],
+    queryFn: () => graphService.getFolder(folderId, 800),
+    enabled: !!folderId,
+    staleTime: 5 * 60 * 1000,
+    placeholderData: { nodes: [], links: [] },
+  });
+
+  const folderNodes = useMemo(() => graphData?.nodes || [], [graphData]);
+  const folderLinks = useMemo(() => graphData?.links || [], [graphData]);
+  const graphStats = useMemo(() => ({
+    nodes: Number(graphData?.total_nodes || folderNodes.length || 0),
+    links: Number(graphData?.total_links || folderLinks.length || 0),
+  }), [graphData, folderNodes, folderLinks]);
+
+  // 4. TanStack Query for weight properties
+  const { data: discoveredProperties } = useQuery({
+    queryKey: ['graph', 'discover-properties', folderId],
+    queryFn: () => weightsService.discoverProperties(folderId),
+    enabled: !!folderId,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const relationshipProperties = useMemo(() => 
+    Object.keys(discoveredProperties?.relationship_properties || {}), 
+    [discoveredProperties]
+  );
+
+  // Set default weight property values once loaded
+  useEffect(() => {
+    if (relationshipProperties.length > 0) {
+      setWeightProperty((curr) => curr || relationshipProperties[0]);
+      setWeightNumerator((curr) => curr || relationshipProperties[0]);
+      setWeightDenominator((curr) => curr || relationshipProperties[1] || relationshipProperties[0]);
+      setWeightPrimaryProperty((curr) => curr || relationshipProperties[0]);
+      setWeightSecondaryProperty((curr) => curr || relationshipProperties[1] || relationshipProperties[0]);
+    }
+  }, [relationshipProperties]);
+
+  // Keep selectedNodes valid within the active folder's nodes
+  useEffect(() => {
+    if (folderNodes.length > 0) {
+      setSelectedNodes((current) => current.filter((id) => folderNodes.some((node) => node.id === id)));
+    }
+  }, [folderNodes]);
 
   const selectedAlgorithm = useMemo(() => getAlgorithmById(selectedAlgorithmId), [selectedAlgorithmId]);
 
@@ -160,44 +174,54 @@ export function useAnalyticsWorkbench() {
     weightSecondaryCoefficient,
   ]);
 
-  async function runAlgorithm() {
+  // 5. TanStack Query for caching algorithm run results
+  const { data: runData, error: runQueryError, isFetching: running } = useQuery({
+    queryKey: ['analytics', 'run', folderId, activeRunParams],
+    queryFn: async () => {
+      if (!activeRunParams) return null;
+      const { algorithmId, params, weightFormula, runFullFolder, nodeIds } = activeRunParams;
+      const algo = getAlgorithmById(algorithmId);
+      
+      const queryParams = {
+        folder_id: folderId,
+        node_ids: nodeIds,
+      };
+
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== '') {
+          queryParams[key] = value;
+        }
+      });
+
+      if (weightFormula) {
+        queryParams.weight_formula = JSON.stringify(weightFormula);
+      }
+
+      return await analyticsService.runAlgorithm(algo.endpoint, queryParams);
+    },
+    enabled: !!folderId && !!activeRunParams && activeRunParams.folderId === folderId,
+    staleTime: Infinity, // Caches results until invalidated by graph updates
+    retry: false,
+  });
+
+  function runAlgorithm() {
     if (!selectedAlgorithm || !folderId) return;
 
     const nodeIds = runFullFolder ? undefined : selectedNodes;
     if (!runFullFolder && (!nodeIds || nodeIds.length === 0)) {
       setError('Choose at least one node in the data popup before running a custom dataset.');
-      setResult(null);
       return;
     }
 
-    const params = {
-      folder_id: folderId,
-      node_ids: nodeIds,
-    };
-
-    Object.entries(algorithmParams).forEach(([key, value]) => {
-      if (value !== undefined && value !== null && value !== '') {
-        params[key] = value;
-      }
-    });
-
-    if (weightFormula) {
-      params.weight_formula = JSON.stringify(weightFormula);
-    }
-
-    setRunning(true);
     setError('');
-
-    try {
-      const data = await analyticsService.runAlgorithm(selectedAlgorithm.endpoint, params);
-      setResult(data);
-    } catch (err) {
-      console.error('Failed to run algorithm:', err);
-      setResult(null);
-      setError(err.response?.data?.detail || 'Algorithm run failed.');
-    } finally {
-      setRunning(false);
-    }
+    setActiveRunParams({
+      algorithmId: selectedAlgorithmId,
+      params: algorithmParams,
+      weightFormula: weightFormula,
+      runFullFolder: runFullFolder,
+      nodeIds: nodeIds,
+      folderId: folderId,
+    });
   }
 
   function toggleNode(nodeId) {
@@ -234,8 +258,8 @@ export function useAnalyticsWorkbench() {
     setAlgorithmParam,
     loadingNodes,
     running,
-    result,
-    error,
+    result: runData || null,
+    error: runQueryError ? (runQueryError.response?.data?.detail || runQueryError.message || 'Algorithm run failed.') : error,
     runAlgorithm,
     relationshipProperties,
     weightingEnabled,

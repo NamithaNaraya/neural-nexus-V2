@@ -62,9 +62,9 @@ export default function AnalyticsPage() {
   }, [result]);
 
   return (
-    <section aria-labelledby="analytics-page-title" className="flex h-full min-h-0 flex-col gap-6 overflow-hidden pt-6 bg-transparent">
-      {/* Analytics Header */}
-      <div className="flex flex-col gap-4 px-6">
+    <section aria-labelledby="analytics-page-title" className="flex h-full min-h-0 flex-col overflow-hidden bg-transparent">
+      {/* Analytics Header — fixed height, never scrolls */}
+      <div className="flex flex-col gap-4 px-6 pt-6 pb-4 shrink-0">
         <div className="flex items-center gap-3">
            <div className="p-2.5 rounded-2xl bg-accent/10 backdrop-blur-xl border border-accent/20">
              <BrainCircuit className="h-6 w-6 text-accent animate-pulse" />
@@ -81,20 +81,22 @@ export default function AnalyticsPage() {
         </div>
       </div>
 
-      <div className="grid flex-1 min-h-0 gap-6 xl:grid-cols-[340px_minmax(0,1fr)] px-6 pb-6">
-        {/* Sidebar Panel */}
-        <div className="min-h-0 h-full overflow-y-auto animate-in fade-in slide-in-from-left-8 duration-700 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-border/40 [&::-webkit-scrollbar-thumb]:rounded-full hover:[&::-webkit-scrollbar-thumb]:bg-border/60">
+      {/* Main Content — 2-column grid, fills ALL remaining height, NO scroll on the grid itself */}
+      <div className="flex-1 min-h-0 grid xl:grid-cols-[340px_minmax(0,1fr)] gap-6 px-6 pb-6 overflow-hidden">
+        {/* LEFT: Algorithm Sidebar — scrolls independently */}
+        <div className="min-h-0 overflow-y-auto animate-in fade-in slide-in-from-left-8 duration-700 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-border/40 [&::-webkit-scrollbar-thumb]:rounded-full hover:[&::-webkit-scrollbar-thumb]:bg-border/60">
           <AlgorithmSidebar
             selectedAlgorithmId={selectedAlgorithmId}
             setSelectedAlgorithmId={setSelectedAlgorithmId}
           />
         </div>
 
-        {/* Main Workbench Area */}
-        <div className="grid min-h-0 gap-6 lg:grid-rows-[auto_1fr] overflow-y-auto pr-3 animate-in fade-in slide-in-from-bottom-8 duration-1000 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-border/40 [&::-webkit-scrollbar-thumb]:rounded-full hover:[&::-webkit-scrollbar-thumb]:bg-border/60">
+        {/* RIGHT: Workbench — flex column, NO overflow-y-auto so flex-1 on children works */}
+        <div className="flex flex-col h-full min-h-0 gap-6 overflow-hidden animate-in fade-in slide-in-from-bottom-8 duration-1000">
+          {/* Top Setup Cards — shrink-0, never takes more space than needed */}
           <div className={cn(
-            "grid gap-6 transition-all duration-700",
-            topPanelsCollapsed ? "xl:grid-cols-1" : "xl:grid-cols-[1fr_1.1fr]"
+            "grid gap-6 shrink-0 transition-all duration-700",
+            topPanelsCollapsed ? "grid-cols-1 md:grid-cols-2" : "grid-cols-1 xl:grid-cols-[1fr_1.1fr]"
           )}>
             <AlgorithmSetupCard
               collapsed={topPanelsCollapsed}
@@ -145,7 +147,10 @@ export default function AnalyticsPage() {
             />
           </div>
 
-          <div className="min-h-0 h-full overflow-hidden" aria-live="polite">
+          {/* Results Panel — MUST fill all remaining height. flex-1 + min-h-0 ensures this.
+              The AnalyticsResultsPanel itself uses flex-1 to fill this container,
+              and its inner table body has overflow-y-auto for scrolling. */}
+          <div className="flex-1 min-h-0 flex flex-col overflow-hidden" aria-live="polite">
             <AnalyticsResultsPanel
               result={result}
               error={error}

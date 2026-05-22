@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { cn } from '../../utils/cn';
 import { useSidebar } from '../../contexts/SidebarContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -68,6 +68,7 @@ export function Sidebar() {
   const { expanded, toggle } = useSidebar();
   const { user, logout } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
 
   return (
     <aside
@@ -96,7 +97,7 @@ export function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav aria-label="Primary" className="flex-1 overflow-hidden overflow-x-visible py-8 px-4 space-y-9">
+      <nav aria-label="Primary" className="flex-1 overflow-y-auto no-scrollbar overflow-x-visible py-6 px-4 space-y-6">
         {navSections.map((section) => (
           <div key={section.label} className="space-y-3">
             {/* Section label */}
@@ -161,10 +162,13 @@ export function Sidebar() {
 
       {/* User Profile Section */}
       <div className="border-t border-border/20 p-5 shrink-0 bg-secondary/10">
-        <div className={cn(
-          'flex items-center gap-4 p-2.5 rounded-[20px] hover:bg-primary/5 transition-all duration-300 cursor-pointer group/profile',
-          !expanded && 'justify-center p-1'
-        )}>
+        <div 
+          onClick={() => navigate('/settings')}
+          className={cn(
+            'flex items-center gap-4 p-2.5 rounded-[20px] hover:bg-primary/5 transition-all duration-300 cursor-pointer group/profile',
+            !expanded && 'justify-center p-1'
+          )}
+        >
           {/* Avatar */}
           <div className="flex h-12 w-12 items-center justify-center rounded-[18px] bg-gradient-to-br from-primary to-accent text-sm font-black text-white shadow-lg shrink-0 group-hover/profile:scale-110 transition-transform duration-500">
             {user?.email?.[0]?.toUpperCase() || 'U'}
@@ -180,7 +184,10 @@ export function Sidebar() {
 
           {expanded && (
             <button
-              onClick={logout}
+              onClick={(e) => {
+                e.stopPropagation();
+                logout();
+              }}
               type="button"
               aria-label="Secure exit"
               className="p-2.5 rounded-xl hover:bg-destructive/10 text-muted-foreground/60 hover:text-destructive transition-all duration-300 group/exit"

@@ -348,11 +348,23 @@ export function GraphFocusDrawer({
                       <Button 
                         variant="gradient" 
                         size="sm" 
-                        className="h-8 gap-1.5 rounded-full bg-primary text-white text-[11px] font-bold px-3 shadow-md hover:shadow-primary/20 transition-all" 
+                        className="h-8 gap-1.5 rounded-full bg-accent text-white text-[11px] font-bold px-3 shadow-md hover:shadow-accent/20 transition-all" 
                         onClick={onAddRelated}
                       >
                         <Plus className="h-3 w-3" />
-                        Related
+                        Build Relationship
+                      </Button>
+                    )}
+                    {activeNode.isPhantom && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 rounded-full hover:bg-slate-100"
+                        onClick={onClose}
+                        title="Cancel creation"
+                        type="button"
+                      >
+                        <X className="h-4 w-4 text-slate-400 hover:text-slate-600" />
                       </Button>
                     )}
                   </div>
@@ -423,17 +435,30 @@ export function GraphFocusDrawer({
                       <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
                       <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tight">System Ready</span>
                    </div>
-                  <Button 
-                    variant="gradient" 
-                    size="sm" 
-                    className="h-9 gap-2 rounded-full px-5 bg-slate-900 text-white font-bold hover:bg-slate-800 transition-all shadow-lg" 
-                    onClick={handleSaveNode} 
-                    disabled={saving} 
-                    type="button"
-                  >
-                    <Save className="h-3.5 w-3.5" />
-                    {activeNode.isPhantom ? 'Publish Node' : 'Update Node'}
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    {activeNode.isPhantom && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-9 gap-1.5 rounded-full px-4 border-slate-200 text-slate-500 font-bold hover:bg-slate-50 transition-all"
+                        onClick={onClose}
+                        type="button"
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                    <Button 
+                      variant="gradient" 
+                      size="sm" 
+                      className="h-9 gap-2 rounded-full px-5 bg-slate-900 text-white font-bold hover:bg-slate-800 transition-all shadow-lg" 
+                      onClick={handleSaveNode} 
+                      disabled={saving} 
+                      type="button"
+                    >
+                      <Save className="h-3.5 w-3.5" />
+                      {activeNode.isPhantom ? 'Publish Node' : 'Update Node'}
+                    </Button>
+                  </div>
                 </div>
 
                 {neighboringNodes.length > 0 ? (
@@ -553,10 +578,22 @@ export function GraphFocusDrawer({
                       <Link2 className="h-4 w-4" />
                     </div>
                     <div>
-                      <h3 className="text-sm font-bold text-slate-900">{activeRelationship.isPhantom ? 'Create Link' : 'Link Details'}</h3>
+                      <h3 className="text-sm font-bold text-slate-900">{activeRelationship.isPhantom ? 'Build Relationship' : 'Relationship Details'}</h3>
                       <p className="text-[10px] font-medium text-slate-400 uppercase tracking-wider">{activeRelationship.id?.substring(0, 8) || 'Draft'}</p>
                     </div>
                   </div>
+                  {activeRelationship.isPhantom && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 rounded-full hover:bg-slate-100"
+                      onClick={onClose}
+                      title="Cancel building relationship"
+                      type="button"
+                    >
+                      <X className="h-4 w-4 text-slate-400 hover:text-slate-600" />
+                    </Button>
+                  )}
                 </div>
 
                 <div className="grid gap-3 pt-1">
@@ -626,17 +663,30 @@ export function GraphFocusDrawer({
                       </Button>
                     ) : null}
                   </div>
-                  <Button 
-                    variant="gradient" 
-                    size="sm" 
-                    className="h-9 gap-2 rounded-full px-5 bg-slate-900 text-white font-bold hover:bg-slate-800 transition-all shadow-lg" 
-                    onClick={handleSaveRelationship} 
-                    disabled={saving} 
-                    type="button"
-                  >
-                    <Save className="h-3.5 w-3.5" />
-                    {activeRelationship.isPhantom ? 'Create Link' : 'Update Link'}
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    {activeRelationship.isPhantom && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-9 gap-1.5 rounded-full px-4 border-slate-200 text-slate-500 font-bold hover:bg-slate-50 transition-all"
+                        onClick={onClose}
+                        type="button"
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                    <Button 
+                      variant="gradient" 
+                      size="sm" 
+                      className="h-9 gap-2 rounded-full px-5 bg-slate-900 text-white font-bold hover:bg-slate-800 transition-all shadow-lg" 
+                      onClick={handleSaveRelationship} 
+                      disabled={saving} 
+                      type="button"
+                    >
+                      <Save className="h-3.5 w-3.5" />
+                      {activeRelationship.isPhantom ? 'Build Relationship' : 'Update Relationship'}
+                    </Button>
+                  </div>
                 </div>
 
                 {/* Redundant properties list removed */}

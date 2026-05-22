@@ -1169,10 +1169,13 @@ export default function GraphForcePage({
 
       {editMode === 'add-link' ? (
         <div className="pointer-events-none absolute left-1/2 top-4 z-20 -translate-x-1/2">
-          <div className="pointer-events-none rounded-full border border-primary/25 bg-primary/10 px-4 py-2 text-[11px] font-bold uppercase tracking-[0.16em] text-primary shadow-sm backdrop-blur-xl">
-            {linkDraft?.sourceNode
-              ? `Select target node • ESC to cancel`
-              : `Select source node • ESC to cancel`}
+          <div className="pointer-events-none flex items-center gap-2.5 rounded-2xl border border-accent/30 bg-accent/10 px-5 py-2.5 shadow-lg shadow-accent/5 backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-300">
+            <span className="flex h-2 w-2 rounded-full bg-accent animate-pulse" />
+            <span className="text-[12px] font-bold uppercase tracking-[0.14em] text-accent">
+              {linkDraft?.sourceNode
+                ? `Now select target node · ESC to cancel`
+                : `Select source node to build relationship · ESC to cancel`}
+            </span>
           </div>
         </div>
       ) : null}

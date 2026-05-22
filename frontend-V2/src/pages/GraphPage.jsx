@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useEffect, useMemo, useState, useRef } from 'react';
 import { Navigate, Route, Routes, useSearchParams } from 'react-router-dom';
-import { ChevronRight, Compass, MoveRight, Radar, RotateCcw, SlidersHorizontal, Sparkles, Spline, Waypoints, Layout } from 'lucide-react';
+import { ChevronRight, Compass, MoveRight, Radar, RotateCcw, SlidersHorizontal, Sparkles, Spline, Waypoints, Layout, X } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Card, CardContent } from '../components/ui/Card';
 import GraphPropertyTablePage from './graph/GraphPropertyTablePage';
@@ -612,30 +612,54 @@ export default function GraphPage() {
                   setNodeSearch('');
                 }}
               />
-              <button
-                type="button"
-                onClick={() => setEditMode(editMode === 'add-node' ? 'view' : 'add-node')}
-                className={[
-                  "inline-flex h-10 items-center rounded-full px-4 text-sm font-medium transition",
-                  editMode === 'add-node' 
-                    ? "border border-primary/35 bg-primary/12 text-primary ring-2 ring-primary/20" 
-                    : "bg-primary text-white shadow-primary/20 hover:bg-primary/90"
-                ].join(' ')}
-              >
-                {editMode === 'add-node' ? 'Place Node...' : 'Add Node'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setEditMode(editMode === 'add-link' ? 'view' : 'add-link')}
-                className={[
-                  "inline-flex h-10 items-center rounded-full px-4 text-sm font-medium transition",
-                  editMode === 'add-link' 
-                    ? "border border-primary/35 bg-primary/12 text-primary ring-2 ring-primary/20" 
-                    : "bg-primary text-white shadow-primary/20 hover:bg-primary/90"
-                ].join(' ')}
-              >
-                {editMode === 'add-link' ? 'Select Nodes...' : 'Add Relation'}
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setEditMode(editMode === 'add-node' ? 'view' : 'add-node')}
+                  className={[
+                    "inline-flex h-10 items-center gap-2 rounded-full px-5 text-sm font-bold tracking-tight transition-all duration-300",
+                    editMode === 'add-node' 
+                      ? "border-2 border-primary/40 bg-primary/12 text-primary ring-2 ring-primary/15 shadow-lg shadow-primary/10" 
+                      : "bg-primary text-white shadow-lg shadow-primary/25 hover:shadow-primary/35 hover:bg-primary/90 active:scale-95"
+                  ].join(' ')}
+                >
+                  {editMode === 'add-node' ? '● Placing Node...' : '+ Add Node'}
+                </button>
+                {editMode === 'add-node' && (
+                  <button
+                    type="button"
+                    onClick={() => setEditMode('view')}
+                    className="flex h-10 w-10 items-center justify-center rounded-full border border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive hover:text-white transition-all duration-300 shadow-md active:scale-95"
+                    title="Cancel placing node"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setEditMode(editMode === 'add-link' ? 'view' : 'add-link')}
+                  className={[
+                    "inline-flex h-10 items-center gap-2 rounded-full px-5 text-sm font-bold tracking-tight transition-all duration-300",
+                    editMode === 'add-link' 
+                      ? "border-2 border-accent/40 bg-accent/12 text-accent ring-2 ring-accent/15 shadow-lg shadow-accent/10" 
+                      : "bg-accent/90 text-white shadow-lg shadow-accent/20 hover:shadow-accent/30 hover:bg-accent active:scale-95"
+                  ].join(' ')}
+                >
+                  {editMode === 'add-link' ? '◌ Select Nodes...' : '⟷ Build Relationship'}
+                </button>
+                {editMode === 'add-link' && (
+                  <button
+                    type="button"
+                    onClick={() => setEditMode('view')}
+                    className="flex h-10 w-10 items-center justify-center rounded-full border border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive hover:text-white transition-all duration-300 shadow-md active:scale-95"
+                    title="Cancel building relationship"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
               <div className="hidden h-10 items-center gap-2 rounded-full border border-border/40 bg-background/60 px-3 text-xs text-muted-foreground md:flex">
                 <span>{Number(graphStats.nodes || 0).toLocaleString()} nodes</span>
                 <span className="text-border">•</span>

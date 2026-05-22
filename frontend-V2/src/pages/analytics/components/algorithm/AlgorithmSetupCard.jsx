@@ -58,6 +58,47 @@ export function AlgorithmSetupCard({
   setWeightSecondaryCoefficient,
 }) {
   const Icon = selectedAlgorithm?.icon;
+
+  if (collapsed) {
+    return (
+      <Card className="border-border/20 bg-secondary/15 shadow-sm backdrop-blur-[40px] rounded-[24px] ring-1 ring-white/10 overflow-hidden">
+        <CardContent className="p-4 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            {Icon && (
+              <div className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border bg-white/80 shadow-sm border-border/10', selectedAlgorithm?.chipClass)}>
+                <Icon className={cn('h-5 w-5', selectedAlgorithm?.iconClass || 'text-muted-foreground/60')} />
+              </div>
+            )}
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-[9px] font-black uppercase tracking-[0.2em] text-primary/60">Algorithm</span>
+                <span className={cn('shrink-0 rounded-md border px-1.5 py-0.5 text-[8px] font-black uppercase tracking-[0.1em]', selectedAlgorithm?.chipClass || 'border-border/10 bg-secondary/5 text-muted-foreground/50')}>
+                  {selectedAlgorithm?.group || 'Network'}
+                </span>
+              </div>
+              <h3 className="text-sm font-black tracking-tight text-foreground uppercase truncate mt-0.5">
+                {selectedAlgorithm?.name || 'Select Algorithm'} • <span className="text-[11px] text-muted-foreground/50 font-bold lowercase tracking-normal">
+                  {runFullFolder
+                    ? `${graphStats.nodes.toLocaleString()} nodes`
+                    : `${selectedNodes.length} selected`}
+                </span>
+              </h3>
+            </div>
+          </div>
+          <Button 
+            onClick={runAlgorithm} 
+            disabled={running || !selectedAlgorithm}
+            variant="gradient"
+            className="h-10 px-5 rounded-xl text-[10px] font-black uppercase tracking-widest shrink-0 shadow-lg hover:scale-105 active:scale-[0.96] transition-all duration-300"
+          >
+            {running ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" /> : <Play className="w-3.5 h-3.5 mr-1.5 fill-current" />}
+            {running ? 'Running' : 'Run'}
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
+
   return (
     <Card className="border-border/20 bg-secondary/15 shadow-[0_32px_64px_-16px_rgba(45,58,40,0.1)] backdrop-blur-[40px] rounded-[32px] ring-1 ring-white/10 overflow-hidden">
       <CardContent className="space-y-6 p-8">
@@ -82,18 +123,6 @@ export function AlgorithmSetupCard({
           </span>
         </div>
 
-        {collapsed ? (
-          <div className="rounded-[20px] border border-border/10 bg-secondary/5 px-6 py-4 text-[12px] font-bold text-muted-foreground/60 tracking-tight animate-fade-in">
-             <div className="flex items-center gap-3">
-               <Target className="w-4 h-4 text-primary/40" />
-               <span>
-                {runFullFolder
-                  ? `Processing ${graphStats.nodes.toLocaleString()} nodes.`
-                  : `Analyzing ${selectedNodes.length} selected node${selectedNodes.length === 1 ? '' : 's'}.`}
-               </span>
-             </div>
-          </div>
-        ) : (
           <div className="space-y-8 animate-fade-in">
             {/* Execution Control */}
             <div className={cn(

@@ -23,6 +23,52 @@ export function DataScopeCard({
 }) {
   const [modalOpen, setModalOpen] = useState(false);
 
+  if (collapsed) {
+    return (
+      <>
+        <Card className="border-border/20 bg-secondary/15 shadow-sm backdrop-blur-[40px] rounded-[24px] ring-1 ring-white/10 overflow-hidden">
+          <CardContent className="p-4 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 border border-primary/20">
+                <FolderOpen className="h-5 w-5 text-primary" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[9px] font-black uppercase tracking-[0.2em] text-primary/60">Data Scope</div>
+                <h3 className="text-sm font-black tracking-tight text-foreground uppercase truncate mt-0.5">
+                  {currentFolder?.name || 'No Dataset'} • <span className="text-[11px] text-muted-foreground/50 font-bold lowercase tracking-normal">
+                    {runFullFolder
+                      ? `${graphStats.nodes.toLocaleString()} nodes`
+                      : `${selectedNodes.length} selected`}
+                  </span>
+                </h3>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onToggleCollapsed}
+              className="h-9 w-9 flex items-center justify-center rounded-xl border border-border/15 bg-secondary/10 text-muted-foreground/40 transition-all duration-300 hover:bg-primary/10 hover:text-primary shrink-0"
+              aria-label="Show Scope"
+            >
+              <ChevronDown className="h-4 w-4" />
+            </button>
+          </CardContent>
+        </Card>
+
+        <DataSelectionModal
+          open={modalOpen}
+          onClose={() => setModalOpen(false)}
+          nodes={folderNodes}
+          links={folderLinks}
+          nodeTypes={nodeTypes}
+          relationshipTypes={relationshipTypes}
+          selectedNodes={selectedNodes}
+          toggleNode={toggleNode}
+          clearSelection={clearSelection}
+        />
+      </>
+    );
+  }
+
   return (
     <>
       <Card className="border-border/20 bg-secondary/15 shadow-[0_32px_64px_-16px_rgba(45,58,40,0.1)] backdrop-blur-[40px] rounded-[32px] ring-1 ring-white/10 overflow-hidden">
@@ -45,21 +91,9 @@ export function DataScopeCard({
             </div>
           </div>
 
-          {collapsed ? (
-            <div className="rounded-[24px] border border-border/10 bg-secondary/5 px-7 py-5 text-[12px] font-bold text-muted-foreground/60 tracking-tight animate-fade-in shadow-inner">
-               <div className="flex items-center gap-3">
-                 <Target className="h-4.5 w-4.5 text-primary/40" />
-                 <span>
-                  {runFullFolder
-                    ? `Processing ${graphStats.nodes.toLocaleString()} nodes with ${graphStats.links.toLocaleString()} relations.`
-                    : `Analyzing ${selectedNodes.length} selected node${selectedNodes.length === 1 ? '' : 's'}.`}
-                 </span>
-               </div>
-            </div>
-          ) : (
-            <div className="space-y-8 animate-fade-in">
-              {/* Folder Origin */}
-              <div className="rounded-[28px] border border-border/10 bg-secondary/5 p-7 shadow-inner">
+          <div className="space-y-8 animate-fade-in">
+            {/* Folder Origin */}
+            <div className="rounded-[28px] border border-border/10 bg-secondary/5 p-7 shadow-inner">
                 <div className="flex items-center gap-4 mb-5 border-b border-border/10 pb-5">
                   <div className="h-12 w-12 rounded-2xl bg-primary/10 flex items-center justify-center border border-primary/20">
                     <FolderOpen className="h-6 w-6 text-primary" />
@@ -172,7 +206,6 @@ export function DataScopeCard({
                 </div>
               </div>
             </div>
-          )}
         </CardContent>
       </Card>
 
