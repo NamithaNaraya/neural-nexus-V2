@@ -9,7 +9,7 @@ Orchestrates the chat process as a stateful graph using LangGraph:
 """
 import logging
 import asyncio
-from datetime import datetime
+import time
 from typing import Dict, Any, List, Optional, TypedDict, Tuple, AsyncGenerator
 from langgraph.graph import StateGraph, END
 
@@ -73,20 +73,25 @@ async def router_node(state: ChatState) -> Dict[str, Any]:
     return {"query_type": "simple_lookup", "requires_scout": False}
 
 
+# ===== Helpers: Safe parallel Neo4j queries =====
+async def _run_neo4j_query(driver, query: str, params: dict) -> list:
+    """Run a single Cypher query in its own session (safe for parallel use)."""
+    async with driver.session() as session:
+        result = await session.run(query, params)
+        return await result.data()
+
+
 # ===== Node 2: Retriever Node =====
 async def retriever_node(state: ChatState) -> Dict[str, Any]:
-    """Retrieves nodes using parallel vector and lexical search in Neo4j."""
+    """Retrieves nodes using parallel vector + fulltext search in Neo4j."""
+    t0 = time.perf_counter()
     question = state["question"]
     scope = state["scope"]
     
-    # Simple tokenization for lexical search fallback
-    terms = [w.strip("?,.!").lower() for w in question.split() if len(w) > 2][:10]
-    params = {
-        "terms": terms,
-        "top_k": 10
-    }
-    
+    # Build scope filter and params
     scope_filter = ""
+    params = {"top_k": 15}
+    
     if scope:
         s_type = scope.get("type")
         s_id = scope.get("id")
@@ -94,18 +99,20 @@ async def retriever_node(state: ChatState) -> Dict[str, Any]:
             scope_filter = "AND node.folder_id = $scope_id"
             params["scope_id"] = s_id
         elif s_type == "file":
-            scope_filter = "AND node.file_id = $scope_id"
+            scope_filter = "AND ($scope_id IN node.file_ids OR node.file_id = $scope_id)"
             params["scope_id"] = s_id
         elif s_type == "selection":
             node_ids = s_id.split(",")
             scope_filter = "AND (node.id IN $node_ids OR elementId(node) IN $node_ids)"
             params["node_ids"] = node_ids
             
-    # Vector query
+    # --- Vector query ---
     ai = get_ai_service()
+    vector_query = None
+    vector_params = dict(params)
     try:
         embedding = await ai.embed(question)
-        params["embedding"] = embedding
+        vector_params["embedding"] = embedding
         
         vector_query = f"""
         CALL db.index.vector.queryNodes('{settings.VECTOR_INDEX_NAME}', $top_k, $embedding) 
@@ -120,67 +127,77 @@ async def retriever_node(state: ChatState) -> Dict[str, Any]:
         """
     except Exception as e:
         logger.error(f"LangGraph Retriever: Embedding generation failed: {e}")
-        vector_query = None
 
-    # Lexical query
+    # --- Fulltext lexical query (uses the entity_search index) ---
+    # Build a Lucene-safe query string from the user question
+    raw_terms = [w.strip("?,.!:;'\"()").lower() for w in question.split() if len(w) > 2]
+    fulltext_query_str = " OR ".join(raw_terms[:10]) if raw_terms else question
+    
+    lexical_params = dict(params)
+    lexical_params["fulltext_query"] = fulltext_query_str
+    
     lexical_query = f"""
-    MATCH (node)
-    WHERE node.name IS NOT NULL
-    AND (ANY(term IN $terms WHERE toLower(node.name) CONTAINS term 
-             OR toLower(node.description) CONTAINS term))
-    {scope_filter}
+    CALL db.index.fulltext.queryNodes('entity_search', $fulltext_query)
+    YIELD node, score
+    WHERE node.name IS NOT NULL {scope_filter}
     RETURN 
         COALESCE(node.id, elementId(node)) as node_id,
         node.name as name,
         COALESCE(node.description, '') as description,
         labels(node)[0] as type,
-        0.85 as score
+        score * 0.85 as score
     LIMIT 20
     """
     
+    # --- Run BOTH queries in parallel using SEPARATE sessions ---
     vector_results = []
     lexical_results = []
+    neo4j = get_neo4j_driver()
     
     try:
-        neo4j = get_neo4j_driver()
-        async with neo4j.session() as session:
-            tasks = []
-            if vector_query:
-                tasks.append(session.run(vector_query, params))
-            tasks.append(session.run(lexical_query, params))
+        tasks = []
+        if vector_query:
+            tasks.append(_run_neo4j_query(neo4j, vector_query, vector_params))
+        tasks.append(_run_neo4j_query(neo4j, lexical_query, lexical_params))
+        
+        completed = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        idx = 0
+        if vector_query:
+            if not isinstance(completed[idx], Exception):
+                vector_results = completed[idx]
+            else:
+                logger.warning(f"LangGraph Retriever: Vector search failed: {completed[idx]}")
+            idx += 1
             
-            completed = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Unpack results
-            idx = 0
-            if vector_query:
-                vec_res = completed[idx]
-                if not isinstance(vec_res, Exception):
-                    vector_results = await vec_res.data()
-                idx += 1
-                
-            lex_res = completed[idx]
-            if not isinstance(lex_res, Exception):
-                lexical_results = await lex_res.data()
+        if not isinstance(completed[idx], Exception):
+            lexical_results = completed[idx]
+        else:
+            logger.warning(f"LangGraph Retriever: Lexical search failed: {completed[idx]}")
                 
     except Exception as e:
         logger.error(f"LangGraph Retriever: Database queries failed: {e}")
         
-    # Deduplicate and merge results
+    # Deduplicate and merge results (vector first for higher precision)
     seen_ids = set()
     all_results = []
     
     for r in vector_results:
-        if r["node_id"] not in seen_ids:
+        nid = r.get("node_id")
+        if nid and nid not in seen_ids:
             all_results.append(r)
-            seen_ids.add(r["node_id"])
+            seen_ids.add(nid)
             
     for r in lexical_results:
-        if r["node_id"] not in seen_ids:
+        nid = r.get("node_id")
+        if nid and nid not in seen_ids:
             all_results.append(r)
-            seen_ids.add(r["node_id"])
+            seen_ids.add(nid)
             
-    all_results.sort(key=lambda x: x["score"], reverse=True)
+    all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    
+    elapsed = time.perf_counter() - t0
+    logger.info(f"[Retriever] {len(vector_results)} vector + {len(lexical_results)} lexical = {len(all_results)} merged results in {elapsed:.2f}s")
     
     return {"vector_results": all_results[:20]}
 
@@ -188,88 +205,98 @@ async def retriever_node(state: ChatState) -> Dict[str, Any]:
 # ===== Node 3: Enricher Node =====
 async def enricher_node(state: ChatState) -> Dict[str, Any]:
     """Expands graph context concurrently for neighbors, shortest paths, and backbone relationships."""
+    t0 = time.perf_counter()
     vector_results = state["vector_results"]
     scope = state["scope"]
     
     if not vector_results:
+        logger.info("[Enricher] No vector results to enrich.")
         return {"graph_context": "", "backbone_relations": ""}
         
     node_ids = [r["node_id"] for r in vector_results[:10]]
-    params = {"node_ids": node_ids}
     
-    scope_filter = ""
+    # Build scope filter for neighbors query (filters on the related node)
+    neighbor_scope_filter = ""
+    neighbor_params = {"node_ids": node_ids}
     if scope:
         sid = scope.get("id")
         if scope.get("type") == "folder":
-            scope_filter = "AND (related.folder_id = $sid OR r.folder_id = $sid)"
-            params["sid"] = sid
+            neighbor_scope_filter = "AND related.folder_id = $sid"
+            neighbor_params["sid"] = sid
         elif scope.get("type") == "file":
-            scope_filter = "AND ($sid IN related.file_ids OR related.file_id = $sid)"
-            params["sid"] = sid
+            neighbor_scope_filter = "AND ($sid IN related.file_ids OR related.file_id = $sid)"
+            neighbor_params["sid"] = sid
             
-    # Context queries
+    # --- Query 1: Direct Neighbors ---
     neighbors_query = f"""
     UNWIND $node_ids AS nodeId
     MATCH (n) WHERE n.id = nodeId OR elementId(n) = nodeId
-    OPTIONAL MATCH (n)-[r]-(related) WHERE related IS NOT NULL {scope_filter}
+    OPTIONAL MATCH (n)-[r]-(related) WHERE related IS NOT NULL {neighbor_scope_filter}
     RETURN n.name as source_name, type(r) as rel_type, related.name as related_name
     LIMIT 30
     """
     
-    path_query = f"""
+    # --- Query 2: Shortest Paths between seed nodes ---
+    path_params = {"node_ids": node_ids}
+    path_query = """
     MATCH (n) WHERE (n.id IN $node_ids OR elementId(n) IN $node_ids)
     WITH collect(n) as seedNodes
     UNWIND seedNodes as n1
     UNWIND seedNodes as n2
     WITH n1, n2 WHERE elementId(n1) < elementId(n2)
-    MATCH p = shortestPath((n1)-[*..8]-(n2))
+    MATCH p = shortestPath((n1)-[*..6]-(n2))
     RETURN [node in nodes(p) | node.name] as names, [rel in relationships(p) | type(rel)] as types
-    LIMIT 10
+    LIMIT 8
     """
     
-    backbone_query = f"""
-    MATCH ()-[r]->()
-    WHERE ($sid IS NULL) OR (r.folder_id = $sid OR r.file_id = $sid)
+    # --- Query 3: Backbone relationship types (fixed: filter on NODE folder_id, not relationship) ---
+    backbone_params = {"sid": None}
+    if scope and scope.get("type") == "folder":
+        backbone_params["sid"] = scope.get("id")
+    
+    backbone_query = """
+    MATCH (a)-[r]->(b)
+    WHERE ($sid IS NULL OR (a.folder_id = $sid AND b.folder_id = $sid))
     WITH type(r) AS relType, count(*) AS relCount
     ORDER BY relCount DESC
     LIMIT 5
     RETURN relType as relationshipType
     """
-    if "sid" not in params:
-        params["sid"] = None
         
+    # --- Run ALL 3 queries in parallel using SEPARATE sessions ---
+    neo4j = get_neo4j_driver()
     try:
-        neo4j = get_neo4j_driver()
-        async with neo4j.session() as session:
-            neighbors_res, paths_res, backbone_res = await asyncio.gather(
-                session.run(neighbors_query, params),
-                session.run(path_query, params),
-                session.run(backbone_query, params),
-                return_exceptions=True
-            )
+        neighbors_data, paths_data, backbone_data = await asyncio.gather(
+            _run_neo4j_query(neo4j, neighbors_query, neighbor_params),
+            _run_neo4j_query(neo4j, path_query, path_params),
+            _run_neo4j_query(neo4j, backbone_query, backbone_params),
+            return_exceptions=True
+        )
             
-            nodes = set()
-            rels = []
-            backbone_types = []
-            
-            # Neighbors
-            if not isinstance(neighbors_res, Exception):
-                neighbors_data = await neighbors_res.data()
-                for r in neighbors_data:
-                    source = r["source_name"]
-                    rel = r["rel_type"]
-                    target = r["related_name"]
+        nodes = set()
+        rels = []
+        backbone_types = []
+        
+        # Neighbors
+        if not isinstance(neighbors_data, Exception):
+            for r in neighbors_data:
+                source = r.get("source_name")
+                rel = r.get("rel_type")
+                target = r.get("related_name")
+                if source:
                     nodes.add(source)
-                    if target:
-                        nodes.add(target)
-                        rels.append(f"{source} -[{rel}]-> {target}")
-                        
-            # Paths
-            if not isinstance(paths_res, Exception):
-                paths_data = await paths_res.data()
-                for r in paths_data:
-                    names = r["names"]
-                    types = r["types"]
+                if target:
+                    nodes.add(target)
+                    rels.append(f"{source} -[{rel}]-> {target}")
+        else:
+            logger.warning(f"[Enricher] Neighbors query failed: {neighbors_data}")
+                    
+        # Paths
+        if not isinstance(paths_data, Exception):
+            for r in paths_data:
+                names = r.get("names", [])
+                types = r.get("types", [])
+                if names and types:
                     path_str = ""
                     for i in range(len(types)):
                         path_str += f"{names[i]} -[{types[i]}]-> "
@@ -277,11 +304,14 @@ async def enricher_node(state: ChatState) -> Dict[str, Any]:
                     rels.append(f"PATH: {path_str}")
                     for name in names:
                         nodes.add(name)
-                        
-            # Backbone
-            if not isinstance(backbone_res, Exception):
-                backbone_data = await backbone_res.data()
-                backbone_types = [r["relationshipType"] for r in backbone_data]
+        else:
+            logger.warning(f"[Enricher] Paths query failed: {paths_data}")
+                    
+        # Backbone
+        if not isinstance(backbone_data, Exception):
+            backbone_types = [r["relationshipType"] for r in backbone_data if r.get("relationshipType")]
+        else:
+            logger.warning(f"[Enricher] Backbone query failed: {backbone_data}")
                 
     except Exception as e:
         logger.error(f"LangGraph Enricher: Context expansion failed: {e}")
@@ -290,12 +320,16 @@ async def enricher_node(state: ChatState) -> Dict[str, Any]:
     # Build text context block
     context = "Knowledge Base Context:\n"
     for r in vector_results[:10]:
-        context += f"- {r['name']} [{r['type']}]: {r['description'][:200]}\n"
+        desc = r.get('description', '')[:200]
+        context += f"- {r['name']} [{r.get('type', 'Entity')}]: {desc}\n"
         
     if rels:
         context += "\nRelationships:\n"
-        for rel in rels[:8]:
+        for rel in rels[:10]:
             context += f"- {rel}\n"
+    
+    elapsed = time.perf_counter() - t0
+    logger.info(f"[Enricher] {len(nodes)} nodes, {len(rels)} rels, {len(backbone_types)} backbone types in {elapsed:.2f}s")
             
     return {
         "graph_context": context,
@@ -306,6 +340,7 @@ async def enricher_node(state: ChatState) -> Dict[str, Any]:
 # ===== Node 4: Synthesizer Node =====
 async def synthesizer_node(state: ChatState) -> Dict[str, Any]:
     """Generates the final response using Ollama LLM."""
+    t0 = time.perf_counter()
     graph_context = state.get("graph_context", "")
     backbone = state.get("backbone_relations", "")
     question = state["question"]
@@ -333,8 +368,8 @@ async def synthesizer_node(state: ChatState) -> Dict[str, Any]:
     ai = get_ai_service()
     try:
         answer_content = await ai.chat(messages)
-        
-        # Prepare citations from retrieved nodes
+        elapsed = time.perf_counter() - t0
+        logger.info(f"[Synthesizer] LLM response in {elapsed:.2f}s ({len(answer_content)} chars)")
         vector_results = state.get("vector_results", [])
         citations = [
             {"node_id": r["node_id"], "node_name": r["name"], "score": r["score"]}
@@ -466,6 +501,7 @@ class LangGraphRAGService:
             "related_nodes": [],
             "error": None
         }
+        t0 = time.perf_counter()
         
         # Step 1: Run graph nodes up to before synthesizer for context assembly
         try:
@@ -479,6 +515,9 @@ class LangGraphRAGService:
             state.update(await router_node(state))
             state.update(await retriever_node(state))
             state.update(await enricher_node(state))
+            
+            t_context = time.perf_counter()
+            logger.info(f"[Stream] Context assembly complete in {t_context - t0:.2f}s")
             
             graph_context = state.get("graph_context", "")
             backbone = state.get("backbone_relations", "")

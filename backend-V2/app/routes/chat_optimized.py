@@ -229,6 +229,7 @@ class CombinedRAGService:
             "related_nodes": [],
             "error": None
         }
+        t_start = time.time()
 
         try:
             from app.services.chat_workflow import router_node, retriever_node, enricher_node
@@ -244,9 +245,26 @@ class CombinedRAGService:
                 }
             }) + "\n"
 
+            # --- Fix 6: Run GDS algorithms for structural/aggregate queries ---
+            gds_algorithm = None
+            gds_results_data = []
+            query_type = initial_state["query_type"]
+            
+            if query_type in ("structural", "aggregate") and folder_id:
+                try:
+                    analytics_svc = AnalyticChatService()
+                    gds_result = await analytics_svc.process_query(
+                        query=question, folder_id=folder_id, node_ids=None
+                    )
+                    gds_algorithm = gds_result.get("algorithm")
+                    gds_results_data = gds_result.get("results", [])
+                    logger.info(f"[Stream] GDS algorithm '{gds_algorithm}' returned {len(gds_results_data)} results")
+                except Exception as gds_err:
+                    logger.warning(f"[Stream] GDS integration skipped: {gds_err}")
+            
             yield json.dumps({
                 "type": "gds_results",
-                "data": {"algorithm": None, "results": []}
+                "data": {"algorithm": gds_algorithm, "results": gds_results_data[:20]}
             }) + "\n"
 
             web_result = None
@@ -342,14 +360,15 @@ class CombinedRAGService:
                         full_answer += content
 
             yield json.dumps({"type": "done"}) + "\n"
-
-            # Database save
-            await save_chat_history_row(user_id, session_id, "user", question)
             
+            elapsed_total = (time.time() - t_start) * 1000
+            logger.info(f"[Stream] Total stream_answer completed in {elapsed_total:.0f}ms")
+
+            # --- Fix 7: Batch save user + assistant in a single Postgres session ---
             citations_metadata = {
-                "algorithm": None,
+                "algorithm": gds_algorithm,
                 "folder_id": folder_id,
-                "gds_results": [],
+                "gds_results": gds_results_data[:5] if gds_results_data else [],
                 "grounding": {
                     "score": grounding_score,
                     "is_grounded": is_grounded,
@@ -362,7 +381,39 @@ class CombinedRAGService:
                     "sources": web_result.get("sources", [])
                 }
             
-            await save_chat_history_row(user_id, session_id, "assistant", full_answer, citations_metadata)
+            db_session_id = session_id or str(uuid.uuid4())
+            try:
+                db_session_id = str(uuid.UUID(db_session_id))
+            except (ValueError, TypeError):
+                db_session_id = str(uuid.uuid5(uuid.NAMESPACE_OID, db_session_id))
+            
+            try:
+                async with get_postgres_session() as pg_session:
+                    # Save user message
+                    await pg_session.execute(
+                        sa_text("""
+                            INSERT INTO neural_nexus.chat_history (user_id, session_id, role, message, citations)
+                            VALUES (:user_id, :session_id, 'user', :message, NULL)
+                        """),
+                        {"user_id": user_id, "session_id": db_session_id, "message": question}
+                    )
+                    # Save assistant message
+                    await pg_session.execute(
+                        sa_text("""
+                            INSERT INTO neural_nexus.chat_history (user_id, session_id, role, message, citations)
+                            VALUES (:user_id, :session_id, 'assistant', :message, CAST(:citations AS JSONB))
+                        """),
+                        {
+                            "user_id": user_id,
+                            "session_id": db_session_id,
+                            "message": full_answer,
+                            "citations": json.dumps(citations_metadata),
+                        }
+                    )
+                    await pg_session.commit()
+                    logger.info(f"[Stream] Batched save: user+assistant in session {db_session_id}")
+            except Exception as save_err:
+                logger.warning(f"[Stream] Failed to batch-save chat history: {save_err}")
 
         except Exception as e:
             logger.error(f"Error in legacy CombinedRAGService stream compatibility: {e}", exc_info=True)
