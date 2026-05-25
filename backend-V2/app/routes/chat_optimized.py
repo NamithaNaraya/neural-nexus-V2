@@ -11,7 +11,7 @@ import json
 import uuid
 import time
 from sqlalchemy import text as sa_text
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 from app.core.security import get_current_user
@@ -46,7 +46,7 @@ class ChatRequest(BaseModel):
     question: str
     folder_id: Optional[str] = None
     session_id: Optional[str] = None
-    history: Optional[List[Dict[str, str]]] = []
+    history: List[Dict[str, str]] = Field(default_factory=list)
     web_search: bool = False
 
 class WebSearchRequest(BaseModel):
@@ -207,200 +207,76 @@ class CombinedRAGService:
         session_id: Optional[str] = None,
         web_search: bool = False,
     ):
-        yield json.dumps({"type": "step", "id": 1, "status": "Analyzing research intent..."}) + "\n"
-
         scope = None
         if folder_id:
             scope = {"type": "folder", "id": folder_id}
         elif file_id:
             scope = {"type": "file", "id": file_id}
 
-        initial_state = {
-            "question": question,
-            "session_id": session_id or "anonymous",
-            "history": history or [],
-            "scope": scope,
-            "query_type": "simple_lookup",
-            "requires_scout": False,
-            "vector_results": [],
-            "graph_context": "",
-            "backbone_relations": "",
-            "answer": "",
-            "citations": [],
-            "related_nodes": [],
-            "error": None
-        }
-        t_start = time.time()
-
+        rag_service = get_langgraph_rag_service()
+        
+        intent = {}
+        gds_algorithm = None
+        gds_results_data = []
+        web_result = None
+        grounding_score = 0.0
+        is_grounded = False
+        full_answer = ""
+        
         try:
-            from app.services.chat_workflow import router_node, retriever_node, enricher_node
-            
-            router_res = await router_node(initial_state)
-            initial_state.update(router_res)
-            
-            yield json.dumps({
-                "type": "intent",
-                "data": {
-                    "query_type": initial_state["query_type"],
-                    "requires_scout": initial_state["requires_scout"]
-                }
-            }) + "\n"
-
-            # --- GDS: Run the algorithm detected by the router (structural/aggregate/pathfinding) ---
-            gds_algorithm = None
-            gds_results_data = []
-            query_type = initial_state["query_type"]
-            router_gds_hint = initial_state.get("gds_algorithm")  # Specific algorithm from router
-
-            # Trigger GDS when: structural or aggregate always; relationship only when algo was detected
-            should_run_gds = (
-                query_type in ("structural", "aggregate") or
-                (query_type == "relationship" and router_gds_hint)
-            ) and bool(folder_id)
-
-            if should_run_gds:
+            async for event in rag_service.query_streaming(
+                question=question,
+                session_id=session_id or "anonymous",
+                history=history or [],
+                scope=scope,
+                web_search=web_search,
+                user_id=user_id,
+            ):
+                # Yield raw JSON lines to keep compatibility with useChat.js (which doesn't expect data: prefix)
+                yield json.dumps(event) + "\n"
+                
+                # Collect info for Postgres persistence
+                if event["type"] == "intent":
+                    intent = event["data"]
+                elif event["type"] == "gds_results":
+                    gds_algorithm = event["data"].get("algorithm")
+                    gds_results_data = event["data"].get("results") or []
+                elif event["type"] == "web_search_result":
+                    web_result = event["data"]
+                elif event["type"] == "data_grounding":
+                    gdata = event["data"]
+                    grounding_score = gdata.get("score", 0.0)
+                    is_grounded = gdata.get("grounded", False)
+                elif event["type"] == "content":
+                    full_answer += event["data"]
+                    
+            # After streaming is complete, persist to PostgreSQL
+            if full_answer and user_id and user_id != "anonymous":
+                db_session_id = session_id or str(uuid.uuid4())
                 try:
-                    analytics_svc = AnalyticChatService()
-                    gds_result = await analytics_svc.process_query(
-                        query=question, folder_id=folder_id, node_ids=None
-                    )
-                    gds_algorithm = gds_result.get("algorithm") or router_gds_hint
-                    gds_results_data = gds_result.get("results", [])
-                    logger.info(f"[Stream] GDS algorithm '{gds_algorithm}' returned {len(gds_results_data)} results")
-                except Exception as gds_err:
-                    # Fall back to the router's detected algorithm name even if execution failed
-                    gds_algorithm = router_gds_hint
-                    logger.warning(f"[Stream] GDS execution skipped (using router hint '{gds_algorithm}'): {gds_err}")
-            
-            yield json.dumps({
-                "type": "gds_results",
-                "data": {"algorithm": gds_algorithm, "results": gds_results_data[:20]}
-            }) + "\n"
-
-            web_result = None
-            if web_search:
-                web_result = await run_simulated_web_search(question)
-                yield json.dumps({
-                    "type": "web_search_result",
-                    "data": {
+                    db_session_id = str(uuid.UUID(db_session_id))
+                except (ValueError, TypeError):
+                    db_session_id = str(uuid.uuid5(uuid.NAMESPACE_OID, db_session_id))
+                
+                citations_metadata = {
+                    "algorithm": gds_algorithm or intent.get("query_type"),
+                    "folder_id": folder_id,
+                    "gds_results": gds_results_data[:5] if gds_results_data else [],
+                    "grounding": {
+                        "score": grounding_score,
+                        "is_grounded": is_grounded,
+                        "source_count": len(gds_results_data)
+                    }
+                }
+                if web_result:
+                    citations_metadata["web_search_attachment"] = {
                         "answer": web_result.get("answer", ""),
                         "sources": web_result.get("sources", [])
                     }
-                }) + "\n"
-
-            retriever_res = await retriever_node(initial_state)
-            initial_state.update(retriever_res)
-            
-            enricher_res = await enricher_node(initial_state)
-            initial_state.update(enricher_res)
-
-            vector_results = initial_state.get("vector_results", [])
-            is_grounded = len(vector_results) > 0
-            # Real grounding score: scales with number of matched nodes, capped at 1.0
-            grounding_score = min(len(vector_results) / 10.0, 1.0) if is_grounded else 0.0
-            suggest_web_search = not is_grounded if not web_search else False
-            thin_context = len(vector_results) < 3
-
-            yield json.dumps({
-                "type": "web_search_suggestion",
-                "data": suggest_web_search,
-                "emphasized": thin_context
-            }) + "\n"
-
-            yield json.dumps({
-                "type": "data_grounding",
-                "data": {
-                    "grounded": is_grounded,
-                    "score": grounding_score,
-                    "source_count": len(vector_results),
-                    "context_chars": len(initial_state.get("graph_context", "")),
-                    "algorithm": None
-                }
-            }) + "\n"
-
-            graph_context = initial_state.get("graph_context", "")
-            backbone = initial_state.get("backbone_relations", "")
-            
-            from app.core.prompts import get_hybrid_rag_system_prompt
-            ai = get_ai_service()
-            full_answer = ""
-
-            # Build conversation history as LangChain messages (last 10 turns)
-            history_messages = []
-            for h in (history or [])[-10:]:
-                role = h.get("role", "user")
-                content = h.get("content", "")
-                if not content:
-                    continue
-                if role == "user":
-                    history_messages.append(HumanMessage(content=content))
-                elif role == "assistant":
-                    history_messages.append(AIMessage(content=content))
-            
-            if not graph_context.strip():
-                if web_result and web_result.get("answer"):
-                    web_ans = web_result.get("answer")
-                    sys_msg = SystemMessage(content=(
-                        "You are a helpful assistant. The user's query could not be answered "
-                        "using the local database, but web search returned some information. "
-                        "Synthesize a clear, helpful response and note it is from the web."
-                    ))
-                    lc_messages = [sys_msg] + history_messages + [
-                        HumanMessage(content=f"Web search context:\n{web_ans}\n\nQuestion: {question}")
-                    ]
-                    async for chunk in ai.llm.astream(lc_messages):
-                        content = chunk.content if hasattr(chunk, "content") else str(chunk)
-                        if content:
-                            yield json.dumps({"type": "content", "data": content}) + "\n"
-                            full_answer += content
-                else:
-                    ans_chunk = "I couldn't find relevant information in your knowledge base for this question. You can try enabling web search, or upload documents related to this topic."
-                    yield json.dumps({"type": "content", "data": ans_chunk}) + "\n"
-                    full_answer = ans_chunk
-            else:
-                # System prompt already contains graph_context — don't duplicate it
-                system_prompt = get_hybrid_rag_system_prompt(graph_context=graph_context, backbone=backbone)
-                lc_messages = [SystemMessage(content=system_prompt)] + history_messages + [
-                    HumanMessage(content=question)
-                ]
                 
-                async for chunk in ai.llm.astream(lc_messages):
-                    content = chunk.content if hasattr(chunk, "content") else str(chunk)
-                    if content:
-                        yield json.dumps({"type": "content", "data": content}) + "\n"
-                        full_answer += content
-
-            elapsed_total = (time.time() - t_start) * 1000
-            logger.info(f"[Stream] Total stream_answer completed in {elapsed_total:.0f}ms")
-
-            # --- Persist to PostgreSQL BEFORE yielding done ---
-            # Saving here (not after done yield) guarantees the save completes
-            # even if the client disconnects immediately after the last content chunk.
-            citations_metadata = {
-                "algorithm": gds_algorithm,
-                "folder_id": folder_id,
-                "gds_results": gds_results_data[:5] if gds_results_data else [],
-                "grounding": {
-                    "score": grounding_score,
-                    "is_grounded": is_grounded,
-                    "source_count": len(vector_results)
-                }
-            }
-            if web_result:
-                citations_metadata["web_search_attachment"] = {
-                    "answer": web_result.get("answer", ""),
-                    "sources": web_result.get("sources", [])
-                }
-            
-            db_session_id = session_id or str(uuid.uuid4())
-            try:
-                db_session_id = str(uuid.UUID(db_session_id))
-            except (ValueError, TypeError):
-                db_session_id = str(uuid.uuid5(uuid.NAMESPACE_OID, db_session_id))
-            
-            if full_answer and user_id and user_id != "anonymous":
                 try:
                     async with get_postgres_session() as pg_session:
+                        # Insert user question
                         await pg_session.execute(
                             sa_text("""
                                 INSERT INTO neural_nexus.chat_history (user_id, session_id, role, message, citations)
@@ -408,6 +284,7 @@ class CombinedRAGService:
                             """),
                             {"user_id": user_id, "session_id": db_session_id, "message": question}
                         )
+                        # Insert assistant response
                         await pg_session.execute(
                             sa_text("""
                                 INSERT INTO neural_nexus.chat_history (user_id, session_id, role, message, citations)
@@ -421,14 +298,12 @@ class CombinedRAGService:
                             }
                         )
                         await pg_session.commit()
-                        logger.info(f"[Stream] Saved user+assistant for session {db_session_id}")
+                        logger.info(f"[Unified Stream] Saved user+assistant for session {db_session_id}")
                 except Exception as save_err:
-                    logger.warning(f"[Stream] Failed to save chat history: {save_err}")
-
-            yield json.dumps({"type": "done"}) + "\n"
-
+                    logger.warning(f"[Unified Stream] Failed to save chat history: {save_err}")
+                    
         except Exception as e:
-            logger.error(f"Error in legacy CombinedRAGService stream compatibility: {e}", exc_info=True)
+            logger.error(f"Error in stream_answer delegate: {e}", exc_info=True)
             yield json.dumps({"type": "content", "data": f"Error: {str(e)}"}) + "\n"
             yield json.dumps({"type": "done"}) + "\n"
 
@@ -474,19 +349,9 @@ async def web_search_primary(
     user_id = current_user.get("id") or current_user.get("sub")
     res = await run_simulated_web_search(request.question)
     sources = res.get("sources", [])
-    answer_text = res.get("answer", "")
-    # Save with structured web_search_attachment so frontend can restore on hydration
-    citations_obj = {
-        "web_search_attachment": {
-            "answer": answer_text,
-            "sources": sources
-        }
-    }
-    # Save the user question first, then the web search answer as assistant
-    await save_chat_history_row(user_id, request.session_id, "user", request.question)
-    await save_chat_history_row(user_id, request.session_id, "assistant", answer_text, citations_obj)
+    await save_chat_history_row(user_id, request.session_id, "web_search", res.get("answer", ""), sources)
     return {
-        "answer": answer_text,
+        "answer": res.get("answer", ""),
         "source": "web_search",
         "grounding_metadata": {
             "search_entry_point": None,
@@ -529,9 +394,7 @@ async def general_answer_primary(
             except Exception:
                 continue
         await save_chat_history_row(user_id, request.session_id, "user", request.question)
-        # Mark as general answer so frontend can restore the UI state on hydration
-        citations_obj = {"is_general_answer": True}
-        await save_chat_history_row(user_id, request.session_id, "assistant", full_text, citations_obj)
+        await save_chat_history_row(user_id, request.session_id, "assistant", full_text)
 
     return StreamingResponse(
         stream_and_save(),
@@ -578,14 +441,16 @@ async def stream_chat_query(
         async def answer_generator():
             full_answer = ""
             try:
-                async for chunk in rag_service.query_streaming(
+                async for event in rag_service.query_streaming(
                     question=request.query,
                     session_id=session_id,
                     history=request.conversation_history or [],
                     scope=scope
                 ):
-                    full_answer += chunk
-                    yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+                    if event["type"] == "content":
+                        chunk = event["data"]
+                        full_answer += chunk
+                        yield f"data: {json.dumps({'chunk': chunk})}\n\n"
                 yield f"data: {json.dumps({'done': True})}\n\n"
             except Exception as e:
                 logger.error(f"[Chat-Stream] Error during streaming: {e}")
@@ -773,19 +638,11 @@ async def web_search(
     user_id = current_user.get("id") or current_user.get("sub")
     res = await run_simulated_web_search(request.question)
     sources = res.get("sources", [])
-    answer_text = res.get("answer", "")
-    # Save with structured web_search_attachment so frontend can restore on hydration
-    citations_obj = {
-        "web_search_attachment": {
-            "answer": answer_text,
-            "sources": sources
-        }
-    }
-    await save_chat_history_row(user_id, request.session_id, "user", request.question)
-    await save_chat_history_row(user_id, request.session_id, "assistant", answer_text, citations_obj)
+    
+    await save_chat_history_row(user_id, request.session_id, "web_search", res.get("answer", ""), sources)
     
     return {
-        "answer": answer_text,
+        "answer": res.get("answer", ""),
         "source": "web_search",
         "grounding_metadata": {
             "search_entry_point": None,
@@ -829,9 +686,7 @@ async def general_answer(
                 continue
         
         await save_chat_history_row(user_id, request.session_id, "user", request.question)
-        # Mark as general answer so frontend can restore the UI state on hydration
-        citations_obj = {"is_general_answer": True}
-        await save_chat_history_row(user_id, request.session_id, "assistant", full_text, citations_obj)
+        await save_chat_history_row(user_id, request.session_id, "assistant", full_text)
 
     return StreamingResponse(
         stream_and_save(),

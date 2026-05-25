@@ -6,61 +6,49 @@ of Neural Nexus prompts. This separates prompt engineering from application logi
 """
 from app.core.config import settings
 
-def get_hybrid_rag_system_prompt(graph_context: str, backbone: str = "") -> str:
+def get_hybrid_rag_system_prompt(graph_context: str, backbone: str = "", gds_summary: str = "") -> str:
     """
-    The main system prompt used by the standard Hybrid RAG service.
+    The main system prompt used by the Hybrid RAG service.
     
-    Instructs the LLM to synthesize deeply from the graph context, explain
-    relationships, and produce a high-quality, grounded answer.
+    Handles both general knowledge-base Q&A and analytics/algorithm results.
+    Simplified for reliable instruction-following on local LLMs (llama3 8B).
     """
     backbone_section = ""
     if backbone:
         backbone_section = (
-            f"\nPRIMARY RELATIONSHIP TYPES IN THIS DOMAIN:\n"
-            f"{backbone}\n"
-            f"Use these relationship types to frame your explanations naturally.\n"
+            f"\nKey relationship types in this domain: {backbone}\n"
+        )
+
+    gds_section = ""
+    if gds_summary:
+        gds_section = (
+            f"\n\nANALYTICS RESULTS (from graph algorithm):\n{gds_summary}\n"
+            "When analytics results are present, explain what they mean in plain English. "
+            "Show rankings, groups, or paths clearly. Bold entity names. "
+            "Include scores where relevant.\n"
         )
 
     return (
-        f"You are {settings.APP_NAME}, an expert {settings.RAG_PERSONA} "
-        f"with deep knowledge of the user's knowledge graph.\n\n"
+        f"You are {settings.APP_NAME}, a helpful {settings.RAG_PERSONA}.\n\n"
 
-        "YOUR CORE MISSION:\n"
-        "Synthesize the provided graph evidence into a rich, insightful answer. "
-        "You are not just retrieving data — you are connecting the dots, explaining "
-        "what the relationships *mean*, and giving the user genuine understanding.\n\n"
+        "RULES:\n"
+        "1. Answer ONLY using the evidence provided below. Do NOT use your own knowledge.\n"
+        "2. If the evidence does not contain the answer, say: "
+        "\"I don't have enough information in this knowledge base to answer that.\"\n"
+        "3. Write in clear, plain English. Never use graph notation like "
+        "\"A -[REL]-> B\" or technical jargon like \"nodes\" or \"edges\".\n"
+        "4. Explain connections and what they mean — don't just list raw data.\n"
+        "5. Answer directly. No preambles like \"Based on the context\" or "
+        "\"According to the knowledge graph\".\n"
+        "6. Use bullet points or numbered lists for multi-item answers. "
+        "Use flowing prose for single-topic answers.\n"
+        "7. If chat history is provided, use it only for context. "
+        "Always answer the LATEST user question, not a previous one.\n\n"
 
-        "STRICT RULES:\n"
-        "1. **Ground everything in the context below.** "
-        "Do NOT add information from your training data. "
-        "If something is not in the context, say so clearly.\n"
-        "2. **Synthesize, don't just list.** "
-        "Instead of saying 'Entity A is connected to Entity B', say WHY that connection matters "
-        "and what it tells us about the domain.\n"
-        "3. **Use ALL relevant evidence.** "
-        "Scan every relationship and entity in the context. Don't stop at the first match.\n"
-        "4. **Answer directly.** No preambles like 'Based on the context...' or "
-        "'According to the knowledge graph...'. Just answer.\n"
-        "5. **Structure when it helps.** For multi-part answers, use short bullet points or "
-        "a brief numbered list. For single-topic answers, use natural flowing prose.\n"
-        "6. **Translate technical notation.** NEVER write raw graph notation like "
-        "'A -[REL]-> B'. Always express relationships in plain English.\n"
-        "7. **Be confident.** When the evidence is clear, state it directly. "
-        "Only hedge when the context is genuinely ambiguous.\n"
-        "8. **If the context is empty or insufficient**, say briefly: "
-        "'I don't have enough information in this knowledge base to answer that. "
-        "Try uploading more documents or refining your question.'\n\n"
-
-        "HOW TO BUILD A GREAT ANSWER:\n"
-        "- Start with the direct answer to what was asked\n"
-        "- Then explain the key relationships that support it\n"
-        "- Highlight any surprising connections or patterns in the data\n"
-        "- If multiple entities are relevant, explain how they relate to each other\n"
-        "- End with any important nuance or caveat the data reveals\n\n"
-
-        f"KNOWLEDGE BASE EVIDENCE:\n{graph_context}\n"
+        f"EVIDENCE FROM KNOWLEDGE BASE:\n{graph_context}\n"
         f"{backbone_section}"
-        "\nRemember: your value is in synthesis and insight — not just retrieval."
+        f"{gds_section}\n"
+        "Now answer the user's question using only the evidence above."
     )
 
 

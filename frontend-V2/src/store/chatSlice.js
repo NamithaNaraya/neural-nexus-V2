@@ -1,126 +1,74 @@
+/**
+ * chatSlice — Phase 2 global chat session state.
+ *
+ * Manages:
+ *  • Active session ID
+ *  • Session list metadata (titles, timestamps, message counts — NOT full messages)
+ *  • Web search toggle
+ *  • Streaming loading flag
+ *
+ * Full message arrays are NOT stored here — they stay in ChatPage's workspace
+ * state / localStorage via chatSessionStorage.js until a full Phase 4 migration.
+ * This slice only holds the lightweight metadata needed for cross-component access.
+ */
 import { createSlice } from '@reduxjs/toolkit';
 
-/**
- * Chat Slice — Manages chat workspace state (sessions, streaming, UI).
- * Replaces local component state + chatSessionStorage for global access.
- */
 const initialState = {
-  // Workspace
-  sessions: [],
-  currentSessionId: null,
-
-  // Active session state
-  isLoading: false,
+  activeSessionId: null,
+  sessionMeta: [],  // [{ id, title, folderId, folderName, createdAt, updatedAt, messageCount }]
+  isWebSearchEnabled: false,
   isStreaming: false,
-
-  // UI
-  webSearchEnabled: false,
-  historyPanelOpen: false,
-  detailsDrawerOpen: false,
-  downloadModalOpen: false,
-
-  // Sync status
-  synced: false,
-  syncError: null,
+  streamingSessionId: null,
+  historyPanelOpen: typeof window !== 'undefined' ? window.innerWidth >= 1280 : false,
 };
 
 const chatSlice = createSlice({
   name: 'chat',
   initialState,
   reducers: {
-    // --- Sessions ---
-    setSessions(state, action) {
-      state.sessions = action.payload;
+    setActiveSessionId(state, action) {
+      state.activeSessionId = action.payload;
     },
-    setCurrentSessionId(state, action) {
-      state.currentSessionId = action.payload;
+    setSessionMeta(state, action) {
+      state.sessionMeta = action.payload;
     },
-    addSession(state, action) {
-      state.sessions.unshift(action.payload);
-      state.currentSessionId = action.payload.id;
-    },
-    removeSession(state, action) {
-      const id = action.payload;
-      state.sessions = state.sessions.filter((s) => s.id !== id);
-      if (state.currentSessionId === id) {
-        state.currentSessionId = state.sessions[0]?.id || null;
+    upsertSessionMeta(state, action) {
+      const meta = action.payload;
+      const idx = state.sessionMeta.findIndex((s) => s.id === meta.id);
+      if (idx >= 0) {
+        state.sessionMeta[idx] = { ...state.sessionMeta[idx], ...meta };
+      } else {
+        state.sessionMeta.unshift(meta);
       }
     },
-    updateSession(state, action) {
-      const { id, ...updates } = action.payload;
-      const session = state.sessions.find((s) => s.id === id);
-      if (session) {
-        Object.assign(session, updates);
-      }
+    removeSessionMeta(state, action) {
+      state.sessionMeta = state.sessionMeta.filter((s) => s.id !== action.payload);
     },
-    updateSessionMessages(state, action) {
-      const { id, messages } = action.payload;
-      const session = state.sessions.find((s) => s.id === id);
-      if (session) {
-        session.messages = messages;
-        session.messageCount = messages.length;
-        session.updatedAt = Date.now();
-      }
-    },
-
-    // --- Loading / Streaming ---
-    setIsLoading(state, action) {
-      state.isLoading = action.payload;
-    },
-    setIsStreaming(state, action) {
-      state.isStreaming = action.payload;
-    },
-
-    // --- UI ---
-    setWebSearchEnabled(state, action) {
-      state.webSearchEnabled = action.payload;
-    },
-    toggleWebSearch(state) {
-      state.webSearchEnabled = !state.webSearchEnabled;
-    },
-    setHistoryPanelOpen(state, action) {
-      state.historyPanelOpen = action.payload;
-    },
-    toggleHistoryPanel(state) {
-      state.historyPanelOpen = !state.historyPanelOpen;
-    },
-    setDetailsDrawerOpen(state, action) {
-      state.detailsDrawerOpen = action.payload;
-    },
-    setDownloadModalOpen(state, action) {
-      state.downloadModalOpen = action.payload;
-    },
-
-    // --- Sync ---
-    setSynced(state, action) {
-      state.synced = action.payload;
-    },
-    setSyncError(state, action) {
-      state.syncError = action.payload;
-    },
-
-    // --- Bulk ---
-    hydrateWorkspace(state, action) {
-      const { sessions, currentSessionId } = action.payload;
-      state.sessions = sessions;
-      state.currentSessionId = currentSessionId;
-      state.synced = true;
-    },
-    resetChat(state) {
-      Object.assign(state, initialState);
-    },
+    setWebSearchEnabled(state, action)  { state.isWebSearchEnabled = action.payload; },
+    setIsStreaming(state, action)       { state.isStreaming          = action.payload; },
+    setStreamingSessionId(state, action){ state.streamingSessionId   = action.payload; },
+    setHistoryPanelOpen(state, action)  { state.historyPanelOpen     = action.payload; },
+    toggleHistoryPanel(state)           { state.historyPanelOpen     = !state.historyPanelOpen; },
   },
 });
 
 export const {
-  setSessions, setCurrentSessionId, addSession, removeSession,
-  updateSession, updateSessionMessages,
-  setIsLoading, setIsStreaming,
-  setWebSearchEnabled, toggleWebSearch,
-  setHistoryPanelOpen, toggleHistoryPanel,
-  setDetailsDrawerOpen, setDownloadModalOpen,
-  setSynced, setSyncError,
-  hydrateWorkspace, resetChat,
+  setActiveSessionId,
+  setSessionMeta,
+  upsertSessionMeta,
+  removeSessionMeta,
+  setWebSearchEnabled,
+  setIsStreaming,
+  setStreamingSessionId,
+  setHistoryPanelOpen,
+  toggleHistoryPanel,
 } = chatSlice.actions;
+
+// ── Selectors ─────────────────────────────────────────────────────────────
+export const selectActiveSessionId    = (state) => state.chat.activeSessionId;
+export const selectSessionMeta        = (state) => state.chat.sessionMeta;
+export const selectIsWebSearchEnabled = (state) => state.chat.isWebSearchEnabled;
+export const selectIsStreaming        = (state) => state.chat.isStreaming;
+export const selectHistoryPanelOpen   = (state) => state.chat.historyPanelOpen;
 
 export default chatSlice.reducer;

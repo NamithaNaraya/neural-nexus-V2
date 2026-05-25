@@ -30,7 +30,11 @@ class AIService:
         self.llm = ChatOllama(
             model=settings.OLLAMA_MODEL,
             base_url=settings.OLLAMA_BASE_URL,
-            temperature=0.1
+            temperature=0.1,
+            num_predict=settings.OLLAMA_NUM_PREDICT,
+            num_ctx=settings.OLLAMA_NUM_CTX,
+            top_p=settings.OLLAMA_TOP_P,
+            repeat_penalty=settings.OLLAMA_REPEAT_PENALTY,
         )
         logger.info(f"LangChain: Ollama initialized with model {settings.OLLAMA_MODEL} at {settings.OLLAMA_BASE_URL}")
         

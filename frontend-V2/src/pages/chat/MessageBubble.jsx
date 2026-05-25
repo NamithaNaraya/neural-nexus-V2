@@ -558,19 +558,38 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, onRequest
         {/* Data Source & Algorithm Indicators */}
         {!isUser && !isError && !isWelcome && !message.isStreaming && message.content && (
           <div className="mt-5 flex flex-wrap items-center gap-2.5">
-            {/* Data source pill */}
+            {/* Data source pill — shows grounding score, source count, and retrieval timing */}
             {message.dataGrounding && (
               <span className={cn(
-                'inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[10px] font-bold uppercase tracking-[0.14em] border transition-all',
+                'inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-[10px] font-bold uppercase tracking-[0.14em] border transition-all',
                 message.dataGrounding.grounded
                   ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
                   : 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400'
               )}>
                 {message.dataGrounding.grounded ? (
-                  <><Database className="h-3 w-3" /> From Knowledge Graph</>
+                  <>
+                    <Database className="h-3 w-3 shrink-0" />
+                    <span>Knowledge Graph</span>
+                    {message.dataGrounding.source_count > 0 && (
+                      <span className="rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-black">
+                        {message.dataGrounding.source_count}&nbsp;node{message.dataGrounding.source_count !== 1 ? 's' : ''}
+                      </span>
+                    )}
+                    {typeof message.dataGrounding.score === 'number' && message.dataGrounding.score > 0 && (
+                      <span className="opacity-60 text-[9px] font-black normal-case tracking-normal">
+                        {Math.round(message.dataGrounding.score * 100)}%
+                      </span>
+                    )}
+                  </>
                 ) : (
-                  <><AlertTriangle className="h-3 w-3" /> No DB Match</>
+                  <><AlertTriangle className="h-3 w-3 shrink-0" /> No DB Match</>
                 )}
+              </span>
+            )}
+            {/* Retrieval timing badge */}
+            {message.dataGrounding?.elapsed_ms > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-border/30 bg-muted/30 px-2.5 py-1.5 text-[9px] font-bold uppercase tracking-[0.1em] text-muted-foreground">
+                {message.dataGrounding.elapsed_ms}&thinsp;ms
               </span>
             )}
             {/* Strategy pill hidden per user preference */}
@@ -610,7 +629,7 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, onRequest
                 ) : (
                   <Globe className="w-4 h-4" />
                 )}
-                {webSearchPending ? 'Searching...' : 'Web Search'}
+                {webSearchPending ? 'Generating...' : 'AI Knowledge'}
               </button>
             )}
 
@@ -644,7 +663,7 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, onRequest
                 ) : (
                   <AlertTriangle className="w-4 h-4" />
                 )}
-                {message.generalAnswerPending ? 'Generating...' : 'External Info'}
+                {message.generalAnswerPending ? 'Generating...' : 'General Knowledge'}
               </button>
             )}
 
@@ -678,7 +697,7 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, onRequest
               <div className="p-2.5 rounded-2xl bg-amber-500/15 backdrop-blur-md">
                 <AlertTriangle className="w-5 h-5" />
               </div>
-              <span className="text-[12px] font-black uppercase tracking-[0.3em]">External Info</span>
+              <span className="text-[12px] font-black uppercase tracking-[0.3em]">General Knowledge</span>
               {message.isStreamingGeneralAnswer && (
                 <div className="ml-auto flex items-center gap-2">
                   <div className="h-2 w-2 rounded-full bg-amber-500 animate-ping" />
@@ -704,7 +723,7 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, onRequest
           </div>
         )}
 
-        {/* Integrated Web Search Result Section */}
+        {/* AI Knowledge Result Section (uses local LLM general knowledge, not live internet) */}
         {(message.webSearchAnswer || message.isStreamingWebSearch) && (
           <div className="mt-8 rounded-[32px] border border-accent/25 bg-accent/5 p-8 shadow-inner backdrop-blur-3xl animate-fade-up ring-1 ring-white/10">
             <div className="mb-6 flex items-center justify-between">
@@ -712,12 +731,12 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, onRequest
                   <div className="p-2.5 rounded-2xl bg-accent/15 backdrop-blur-md">
                     <Globe className="w-5 h-5" />
                   </div>
-                  <span className="text-[12px] font-black uppercase tracking-[0.3em]">Search Results</span>
+                  <span className="text-[12px] font-black uppercase tracking-[0.3em]">AI Knowledge</span>
               </div>
               {message.isStreamingWebSearch && (
                 <div className="flex items-center gap-2">
                    <div className="h-2 w-2 rounded-full bg-accent animate-ping" />
-                   <span className="text-[10px] font-black text-accent/60 uppercase tracking-widest">Active Flow</span>
+                   <span className="text-[10px] font-black text-accent/60 uppercase tracking-widest">Generating</span>
                 </div>
               )}
             </div>
@@ -735,7 +754,7 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, onRequest
               ) : null}
               {message.isStreamingWebSearch && !hasWebSearchText && (
                 <div className="flex items-center gap-4 py-2">
-                  <span className="text-[11px] font-black text-accent/60 tracking-[0.2em] uppercase">Retrieving Context</span>
+                  <span className="text-[11px] font-black text-accent/60 tracking-[0.2em] uppercase">Generating...</span>
                   <AnimatedDots tone="amber" />
                 </div>
               )}
@@ -743,7 +762,7 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, onRequest
 
             {Array.isArray(message.webSearchSources) && message.webSearchSources.length > 0 && (
               <div className="mt-8 pt-7 border-t border-accent/20">
-                <div className="mb-5 text-[10px] font-black uppercase tracking-[0.4em] text-accent/50">Verified Data Sources</div>
+                <div className="mb-5 text-[10px] font-black uppercase tracking-[0.4em] text-accent/50">Reference Sources</div>
                 <div className="flex flex-wrap gap-3.5">
                   {message.webSearchSources.map((source, idx) => {
                     const url = source?.url || source?.uri || '';

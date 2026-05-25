@@ -1,7 +1,7 @@
 import React, { Suspense, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { Button } from '../../components/ui/Button';
-import { RotateCcw, PanelRightClose, Download, ChevronDown, SquarePen, Globe, Loader2, Sprout, Leaf } from 'lucide-react';
+import { RotateCcw, PanelRightClose, Download, ChevronDown, SquarePen, Globe, Loader2, Sprout, Leaf, Square } from 'lucide-react';
 import { MessageBubble, TypingIndicator } from './MessageBubble';
 import { ChatInput } from './ChatInput';
 import { VirtualMessageList } from './components/VirtualMessageList';
@@ -191,6 +191,8 @@ export default function ChatPage() {
   const saveTimeoutRef = useRef(null);
   const streamBufferRef = useRef('');
   const streamFlushTimerRef = useRef(null);
+  const abortControllerRef = useRef(null);
+  const activeHttpStreamIdRef = useRef(null);
   const wsRef = useRef(null);
   const wsStateRef = useRef({ status: 'idle' });
   const wsRequestIdRef = useRef(null);
@@ -270,11 +272,6 @@ export default function ChatPage() {
         }
         continue;
       }
-
-      // Find the preceding user message to derive originalQuestion
-      const precedingUserMsg = result.length > 0 ? result[result.length - 1] : null;
-      const originalQuestion = (precedingUserMsg?.role === 'user') ? precedingUserMsg.content : '';
-
       const normalizedMessage = {
         role: msg.role || 'assistant',
         content: msg.message || msg.content || '',
@@ -284,36 +281,13 @@ export default function ChatPage() {
         algorithm: msg.algorithm || null,
         results: msg.results || null,
         dataGrounding: msg.dataGrounding || null,
-        // Restore intent and context summary
-        intent: msg.intent || null,
-        contextSummary: msg.contextSummary || '',
       };
 
-      // Restore originalQuestion for assistant messages
-      if (normalizedMessage.role === 'assistant' && originalQuestion) {
-        normalizedMessage.originalQuestion = originalQuestion;
-      }
-
-      // Restore web search data — from direct fields (backend unpacks) or from web_search_attachment in citations
-      if (msg.webSearchAnswer || msg.isWebSearch) {
-        normalizedMessage.webSearchAnswer = msg.webSearchAnswer || '';
-        normalizedMessage.webSearchSources = Array.isArray(msg.webSearchSources)
-          ? normalizeWebSearchSources(msg.webSearchSources)
-          : [];
-        normalizedMessage.isWebSearch = true;
-        normalizedMessage.webSearchPending = false;
-      } else if (webAttachment) {
+      if (webAttachment) {
         normalizedMessage.webSearchAnswer = webAttachment.answer;
         normalizedMessage.webSearchSources = webAttachment.sources;
         normalizedMessage.isWebSearch = true;
         normalizedMessage.webSearchPending = false;
-      }
-
-      // Restore general answer — from isGeneralAnswer marker (content IS the general answer)
-      if (msg.isGeneralAnswer && normalizedMessage.role === 'assistant') {
-        normalizedMessage.generalAnswer = normalizedMessage.content;
-        normalizedMessage.isGeneralAnswer = true;
-        normalizedMessage.generalAnswerPending = false;
       }
 
       result.push(normalizedMessage);
@@ -405,6 +379,19 @@ export default function ChatPage() {
 
   const clearChat = useCallback(() => {
     setIsClearConfirmOpen(true);
+  }, []);
+
+  const stopStream = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    if (streamFlushTimerRef.current) {
+      cancelAnimationFrame(streamFlushTimerRef.current);
+      streamFlushTimerRef.current = null;
+    }
+    streamBufferRef.current = '';
+    setLoading(false);
   }, []);
 
   const confirmClearChat = useCallback(async () => {
@@ -577,39 +564,9 @@ export default function ChatPage() {
         if (rawMessages && rawMessages.length > 0) {
           const normalized = normalizeBackendMessages(rawMessages);
           attemptedSessionsHydrationRef.current.add(sessionId);
-
-          // Merge: for each message, prefer the source that has richer metadata.
-          // Local messages (from localStorage) may have fields the backend doesn't store yet.
-          const localMessages = session?.messages || [];
-          const merged = normalized.map((backendMsg, idx) => {
-            const localMsg = localMessages[idx];
-            if (!localMsg || localMsg.isWelcome) return backendMsg;
-            // If roles don't match at this index, backend is authoritative
-            if (localMsg.role !== backendMsg.role) return backendMsg;
-
-            // Enrich backend message with any local-only fields it's missing
-            const enriched = { ...backendMsg };
-            const richFields = [
-              'webSearchAnswer', 'webSearchSources', 'isWebSearch',
-              'generalAnswer', 'isGeneralAnswer',
-              'dataGrounding', 'algorithm', 'results',
-              'intent', 'contextSummary', 'originalQuestion',
-            ];
-            for (const field of richFields) {
-              const backendVal = backendMsg[field];
-              const localVal = localMsg[field];
-              const backendEmpty = backendVal == null || backendVal === '' || (Array.isArray(backendVal) && backendVal.length === 0);
-              const localHasValue = localVal != null && localVal !== '' && !(Array.isArray(localVal) && localVal.length === 0);
-              if (backendEmpty && localHasValue) {
-                enriched[field] = localVal;
-              }
-            }
-            return enriched;
-          });
-
           setWorkspace(prev => ({
             ...prev,
-            sessions: prev.sessions.map(s => s.id === sessionId ? { ...s, messages: merged, messageCount: rawMessages.length } : s)
+            sessions: prev.sessions.map(s => s.id === sessionId ? { ...s, messages: normalized, messageCount: rawMessages.length } : s)
           }));
         } else {
           attemptedSessionsHydrationRef.current.delete(sessionId);
@@ -704,7 +661,7 @@ export default function ChatPage() {
     }
     setLoading(true);
     try {
-      const response = await api.post('/chat-optimized/web-search', { question: searchQuery, context_hint: fallbackContext, session_id: workspace.currentSessionId || null }, { timeout: 120000 });
+      const response = await api.post('/chat-optimized/web-search', { question: searchQuery, context_hint: fallbackContext, session_id: workspace.currentSessionId || null });
       const fullAnswer = response.data?.answer || response.data?.response || 'No findings available.';
       const sources = normalizeWebSearchSources(response.data?.grounding_metadata);
       if (typeof messageIndex === 'number') {
@@ -818,13 +775,22 @@ export default function ChatPage() {
           : session
       ),
     }));
+    const httpStreamId = `${activeSessionId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    let httpAbortController = null;
     setLoading(true);
     try {
+      activeHttpStreamIdRef.current = httpStreamId;
+      let httpStreamBuffer = '';
+      const isCurrentHttpStream = () => activeHttpStreamIdRef.current === httpStreamId;
+
       streamBufferRef.current = '';
       if (streamFlushTimerRef.current) {
-        clearTimeout(streamFlushTimerRef.current);
+        cancelAnimationFrame(streamFlushTimerRef.current);
         streamFlushTimerRef.current = null;
       }
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+      httpAbortController = new AbortController();
+      abortControllerRef.current = httpAbortController;
       const streamMeta = {
         algorithm: null,
         results: null,
@@ -866,9 +832,9 @@ export default function ChatPage() {
       };
 
       const flushStreamBuffer = () => {
-        if (!streamBufferRef.current) return;
-        const pending = streamBufferRef.current;
-        streamBufferRef.current = '';
+        if (!isCurrentHttpStream() || !httpStreamBuffer) return;
+        const pending = httpStreamBuffer;
+        httpStreamBuffer = '';
         setWorkspace((prev) => {
           const s = prev.sessions.find((x) => x.id === activeSessionId);
           if (!s || !s.messages?.length) return prev;
@@ -884,11 +850,12 @@ export default function ChatPage() {
       };
 
       const scheduleStreamFlush = () => {
+        if (!isCurrentHttpStream()) return;
         if (streamFlushTimerRef.current) return;
-        streamFlushTimerRef.current = window.setTimeout(() => {
+        streamFlushTimerRef.current = requestAnimationFrame(() => {
           streamFlushTimerRef.current = null;
           flushStreamBuffer();
-        }, 16);
+        });
       };
 
       const activeMessages = messages.filter(m => !m.isWelcome).map(m => ({ role: m.role, content: m.content }));
@@ -896,6 +863,7 @@ export default function ChatPage() {
       const streamViaHttp = async () => {
         const response = await fetch('/api/v1/chat-optimized/stream-answer', {
           method: 'POST',
+          signal: httpAbortController.signal,
           headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
           body: JSON.stringify({
             question: userMessage,
@@ -913,10 +881,11 @@ export default function ChatPage() {
         const processLine = (line) => {
           const trimmed = line.trim();
           if (!trimmed) return;
+          if (!isCurrentHttpStream()) return;
           try {
             const chunk = JSON.parse(trimmed);
             if (chunk.type === 'content') {
-              streamBufferRef.current += chunk.data;
+              httpStreamBuffer += chunk.data;
               scheduleStreamFlush();
             } else if (chunk.type === 'gds_results') {
               applyStreamMeta({
@@ -964,12 +933,12 @@ export default function ChatPage() {
       await streamViaHttp();
 
       if (streamFlushTimerRef.current) {
-        clearTimeout(streamFlushTimerRef.current);
+        cancelAnimationFrame(streamFlushTimerRef.current);
         streamFlushTimerRef.current = null;
       }
-      const finalPending = streamBufferRef.current;
+      const finalPending = isCurrentHttpStream() ? httpStreamBuffer : '';
       if (finalPending) {
-        streamBufferRef.current = '';
+        httpStreamBuffer = '';
         setWorkspace((prev) => {
           const s = prev.sessions.find((x) => x.id === activeSessionId);
           if (!s || !s.messages?.length) return prev;
@@ -983,12 +952,27 @@ export default function ChatPage() {
           };
         });
       }
-      setWorkspace(prev => ({ ...prev, sessions: prev.sessions.map(s => s.id === activeSessionId ? { ...s, messages: s.messages.map((m, i) => i === s.messages.length - 1 ? { ...m, isStreaming: false } : m) } : s) }));
-    } catch { toast.error('Synthesis interrupted.'); } finally {
+      if (isCurrentHttpStream()) {
+        setWorkspace(prev => ({ ...prev, sessions: prev.sessions.map(s => s.id === activeSessionId ? { ...s, messages: s.messages.map((m, i) => i === s.messages.length - 1 ? { ...m, isStreaming: false } : m) } : s) }));
+      }
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        toast.error('Synthesis interrupted.');
+      }
+    } finally {
+      const finishedCurrentStream = activeHttpStreamIdRef.current === httpStreamId;
+      if (finishedCurrentStream) {
+        activeHttpStreamIdRef.current = null;
+      }
       if (wsSessionIdRef.current === activeSessionId) {
         wsSessionIdRef.current = null;
       }
-      setLoading(false);
+      if (abortControllerRef.current === httpAbortController) {
+        abortControllerRef.current = null;
+      }
+      if (finishedCurrentStream) {
+        setLoading(false);
+      }
     }
   };
 
@@ -1035,10 +1019,10 @@ export default function ChatPage() {
 
     const scheduleStreamFlush = () => {
       if (streamFlushTimerRef.current) return;
-      streamFlushTimerRef.current = window.setTimeout(() => {
+      streamFlushTimerRef.current = requestAnimationFrame(() => {
         streamFlushTimerRef.current = null;
         flushStreamBuffer();
-      }, 45);
+      });
     };
 
     ws.onopen = () => {
@@ -1150,7 +1134,7 @@ export default function ChatPage() {
 
     return () => {
       if (streamFlushTimerRef.current) {
-        clearTimeout(streamFlushTimerRef.current);
+        cancelAnimationFrame(streamFlushTimerRef.current);
       }
       try {
         wsRequestIdRef.current = null;
@@ -1219,6 +1203,16 @@ export default function ChatPage() {
                 <SquarePen className="h-4.5 w-4.5" />
                 <span className="hidden md:inline">New Session</span>
               </button>
+
+              {loading && (
+                <button
+                  onClick={stopStream}
+                  className="flex h-11 w-11 items-center justify-center rounded-xl bg-amber-500/10 text-amber-600 border border-amber-500/20 transition hover:bg-amber-500 hover:text-white"
+                  title="Stop streaming"
+                >
+                  <Square className="h-4 w-4 fill-current" />
+                </button>
+              )}
               
               <button
                 onClick={clearChat}
