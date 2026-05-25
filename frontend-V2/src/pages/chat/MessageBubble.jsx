@@ -373,7 +373,7 @@ const AnimatedDots = ({ tone = 'neutral' }) => {
   );
 };
 
-function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, onRequestGeneralAnswer, messageIndex }) {
+function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, messageIndex }) {
   const [algoExpanded, setAlgoExpanded] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const isUser = message.role === 'user';
@@ -607,7 +607,7 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, onRequest
 
 
         {/* Action Bar (Web Search / Details / Answer Outside DB / Speak) */}
-        {!isUser && !isError && !isWelcome && !message.isStreaming && message.content && ((onWebSearch && !message.webSearchAnswer) || hasAnalysisDetails || (onRequestGeneralAnswer && !message.generalAnswer) || hasAssistantText || hasWebSearchText) && (
+        {!isUser && !isError && !isWelcome && !message.isStreaming && message.content && ((onWebSearch && !message.webSearchAnswer) || hasAnalysisDetails || hasAssistantText || hasWebSearchText) && (
           <div className="mt-7 flex flex-wrap gap-4 border-t border-border/20 pt-7">
             {onWebSearch && !message.webSearchAnswer && message.content && (
               <button
@@ -643,29 +643,7 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, onRequest
               </button>
             )}
 
-            {/* Answer Outside DB button — always available */}
-            {onRequestGeneralAnswer && !message.generalAnswer && (
-              <button
-                onClick={() => onRequestGeneralAnswer({
-                  question: message.originalQuestion || message.content,
-                  messageIndex,
-                })}
-                disabled={message.generalAnswerPending}
-                className={cn(
-                  'flex items-center gap-3 rounded-[20px] px-5 py-2.5 text-[11px] font-black uppercase tracking-[0.2em] transition-all ring-1 ring-inset',
-                  message.generalAnswerPending
-                    ? 'bg-muted/10 ring-border/20 text-muted-foreground'
-                    : 'bg-amber-500/10 ring-amber-500/30 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 hover:scale-105 active:scale-95 hover:shadow-xl hover:shadow-amber-500/20 shadow-sm'
-                )}
-              >
-                {message.generalAnswerPending ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <AlertTriangle className="w-4 h-4" />
-                )}
-                {message.generalAnswerPending ? 'Generating...' : 'General Knowledge'}
-              </button>
-            )}
+
 
             {/* Speak button — available for Assistant messages with content */}
             {!isUser && !message.isStreaming && (hasAssistantText || hasWebSearchText) && (
@@ -690,38 +668,7 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, onRequest
           </div>
         )}
 
-        {/* General Answer (outside DB) Section */}
-        {(message.generalAnswer || message.isStreamingGeneralAnswer) && (
-          <div className="mt-8 rounded-[32px] border border-amber-500/25 bg-amber-500/5 p-8 shadow-inner backdrop-blur-3xl animate-fade-up ring-1 ring-amber-500/10">
-            <div className="mb-6 flex items-center gap-4 text-amber-600 dark:text-amber-400">
-              <div className="p-2.5 rounded-2xl bg-amber-500/15 backdrop-blur-md">
-                <AlertTriangle className="w-5 h-5" />
-              </div>
-              <span className="text-[12px] font-black uppercase tracking-[0.3em]">General Knowledge</span>
-              {message.isStreamingGeneralAnswer && (
-                <div className="ml-auto flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-amber-500 animate-ping" />
-                  <span className="text-[10px] font-black text-amber-500/60 uppercase tracking-widest">Streaming</span>
-                </div>
-              )}
-            </div>
-            <div className="prose prose-sm max-w-none break-words whitespace-normal w-full overflow-hidden">
-              {message.isStreamingGeneralAnswer && !message.generalAnswer?.trim() ? (
-                <div className="flex items-center gap-4 py-2">
-                  <span className="text-[11px] font-black text-amber-500/60 tracking-[0.2em] uppercase">Generating</span>
-                  <AnimatedDots tone="amber" />
-                </div>
-              ) : message.isStreamingGeneralAnswer ? (
-                <p className="mb-0 whitespace-pre-wrap leading-[1.8] text-foreground/90 font-medium">
-                  {message.generalAnswer}
-                  <span className="inline-block w-3 h-5 ml-3 bg-amber-500/40 rounded-sm animate-pulse align-text-bottom" />
-                </p>
-              ) : (
-                renderMarkdownContent(message.generalAnswer)
-              )}
-            </div>
-          </div>
-        )}
+
 
         {/* AI Knowledge Result Section (uses local LLM general knowledge, not live internet) */}
         {(message.webSearchAnswer || message.isStreamingWebSearch) && (
@@ -803,7 +750,6 @@ export const MessageBubble = React.memo(
     prevProps.message === nextProps.message
     && prevProps.messageIndex === nextProps.messageIndex
     && prevProps.onOpenDetails === nextProps.onOpenDetails
-    && prevProps.onRequestGeneralAnswer === nextProps.onRequestGeneralAnswer
 );
 
 export const TypingIndicator = React.memo(function TypingIndicator() {

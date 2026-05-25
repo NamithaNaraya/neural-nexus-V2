@@ -650,86 +650,123 @@ export default function ChatPage() {
     const fallbackContext = contextHint || currentFolder?.name || 'general';
     let appendedMessageIndex = null;
     if (typeof messageIndex === 'number') {
-      updateMessageAtIndex(messageIndex, (message) => ({ ...message, webSearchPending: true, isWebSearch: true, webSearchQuery: searchQuery, webSearchContextHint: fallbackContext }));
+      updateMessageAtIndex(messageIndex, (message) => ({
+        ...message,
+        webSearchPending: true,
+        isWebSearch: true,
+        webSearchQuery: searchQuery,
+        webSearchContextHint: fallbackContext,
+        webSearchAnswer: '',
+        webSearchSources: []
+      }));
     } else if (appendMessage) {
       appendedMessageIndex = messages.length;
       updateCurrentSession((session) => ({
         ...session,
-        messages: [...session.messages, { role: 'assistant', content: '', isWebSearch: true, webSearchPending: true, webSearchQuery: searchQuery, webSearchContextHint: fallbackContext }],
+        messages: [
+          ...session.messages,
+          {
+            role: 'assistant',
+            content: '',
+            isWebSearch: true,
+            webSearchPending: true,
+            webSearchQuery: searchQuery,
+            webSearchContextHint: fallbackContext,
+            webSearchAnswer: '',
+            webSearchSources: []
+          }
+        ],
         updatedAt: Date.now(),
       }));
     }
     setLoading(true);
     try {
-      const response = await api.post('/chat-optimized/web-search', { question: searchQuery, context_hint: fallbackContext, session_id: workspace.currentSessionId || null });
-      const fullAnswer = response.data?.answer || response.data?.response || 'No findings available.';
-      const sources = normalizeWebSearchSources(response.data?.grounding_metadata);
-      if (typeof messageIndex === 'number') {
-        updateMessageAtIndex(messageIndex, (message) => ({ ...message, webSearchPending: false, webSearchAnswer: fullAnswer, webSearchSources: sources, isStreamingWebSearch: false }));
-      } else if (appendMessage && typeof appendedMessageIndex === 'number') {
-        updateMessageAtIndex(appendedMessageIndex, (message) => ({ ...message, webSearchPending: false, webSearchAnswer: fullAnswer, webSearchSources: sources, isStreamingWebSearch: false }));
-      }
-    } catch { toast.error('Web pollination failed.'); } finally { setLoading(false); }
-  }, [currentFolder?.name, messages.length, updateCurrentSession, updateMessageAtIndex, workspace.currentSessionId]);
+      // Collect message history excluding welcomes and previous web searches to keep prompt focused
+      const activeMessages = messages
+        .filter(m => !m.isWelcome && !m.isWebSearch)
+        .map(m => ({ role: m.role, content: m.content }));
 
-  const requestGeneralAnswer = useCallback(async ({ question, messageIndex }) => {
-    if (!question || loading) return;
-    setLoading(true);
-    // Mark the message as loading general answer
-    if (typeof messageIndex === 'number') {
-      updateMessageAtIndex(messageIndex, (msg) => ({ ...msg, generalAnswerPending: true }));
-    }
-    try {
       const token = localStorage.getItem('neural_nexus_token');
       const response = await fetch('/api/v1/chat-optimized/general-answer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify({ question, session_id: workspace.currentSessionId || null }),
+        body: JSON.stringify({
+          question: searchQuery,
+          session_id: workspace.currentSessionId || null,
+          history: activeMessages.slice(-CHAT_HISTORY_SEND_WINDOW)
+        }),
       });
       if (!response.ok) throw new Error('Network fault');
+
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
       let fullAnswer = '';
+      let sources = [];
+      const targetIndex = typeof messageIndex === 'number' ? messageIndex : appendedMessageIndex;
+
+      // Line buffer handles JSON objects split across multiple read() calls
+      let lineBuffer = '';
+      const processLine = (line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        try {
+          const chunk = JSON.parse(trimmed);
+          if (chunk.type === 'content' && chunk.data) {
+            fullAnswer += chunk.data;
+            if (typeof targetIndex === 'number') {
+              const currentAnswer = fullAnswer;
+              updateMessageAtIndex(targetIndex, (message) => ({
+                ...message,
+                webSearchPending: false,
+                isStreamingWebSearch: true,
+                webSearchAnswer: currentAnswer,
+              }));
+            }
+          } else if (chunk.type === 'sources' && Array.isArray(chunk.data)) {
+            sources = normalizeWebSearchSources(chunk.data);
+          }
+        } catch { /* parse fail — incomplete or non-JSON line */ }
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunkStr = decoder.decode(value, { stream: true });
-        for (const line of chunkStr.split('\n')) {
-          if (!line.trim()) continue;
-          try {
-            const chunk = JSON.parse(line);
-            if (chunk.type === 'content' && chunk.data) {
-              fullAnswer += chunk.data;
-              if (typeof messageIndex === 'number') {
-                const currentAnswer = fullAnswer;
-                updateMessageAtIndex(messageIndex, (msg) => ({
-                  ...msg,
-                  generalAnswer: currentAnswer,
-                  generalAnswerPending: false,
-                  isStreamingGeneralAnswer: true,
-                }));
-              }
-            }
-          } catch { /* parse fail */ }
+        lineBuffer += decoder.decode(value, { stream: true });
+        const lines = lineBuffer.split('\n');
+        // Process complete lines
+        for (let i = 0; i < lines.length - 1; i++) {
+          processLine(lines[i]);
         }
+        lineBuffer = lines[lines.length - 1];
       }
-      if (typeof messageIndex === 'number') {
-        updateMessageAtIndex(messageIndex, (msg) => ({
-          ...msg,
-          generalAnswer: fullAnswer,
-          generalAnswerPending: false,
-          isStreamingGeneralAnswer: false,
+      if (lineBuffer.trim()) {
+        processLine(lineBuffer);
+      }
+
+      if (typeof targetIndex === 'number') {
+        updateMessageAtIndex(targetIndex, (message) => ({
+          ...message,
+          webSearchPending: false,
+          isStreamingWebSearch: false,
+          webSearchAnswer: fullAnswer,
+          webSearchSources: sources,
         }));
       }
-    } catch {
-      toast.error('General answer failed.');
-      if (typeof messageIndex === 'number') {
-        updateMessageAtIndex(messageIndex, (msg) => ({ ...msg, generalAnswerPending: false }));
+    } catch (err) {
+      console.error(err);
+      toast.error('AI Knowledge request failed.');
+      const targetIndex = typeof messageIndex === 'number' ? messageIndex : appendedMessageIndex;
+      if (typeof targetIndex === 'number') {
+        updateMessageAtIndex(targetIndex, (message) => ({
+          ...message,
+          webSearchPending: false,
+          isStreamingWebSearch: false,
+        }));
       }
     } finally {
       setLoading(false);
     }
-  }, [loading, updateMessageAtIndex, workspace.currentSessionId]);
+  }, [currentFolder?.name, messages, updateCurrentSession, updateMessageAtIndex, workspace.currentSessionId]);
 
   const sendMessage = async (e, overrideMessage = null) => {
     e.preventDefault();
@@ -1247,7 +1284,6 @@ export default function ChatPage() {
               messages={virtualItems}
               onWebSearch={performWebSearch}
               onOpenDetails={openMessageDetails}
-              onRequestGeneralAnswer={requestGeneralAnswer}
             />
             {/* Ambient Bottom Fade */}
             <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-24 bg-gradient-to-t from-background/75 to-transparent z-10" />

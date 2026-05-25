@@ -5,7 +5,6 @@ export function VirtualMessageList({
   messages = [],
   onWebSearch,
   onOpenDetails,
-  onRequestGeneralAnswer,
 }) {
   const scrollRef = useRef(null);
 
@@ -34,7 +33,6 @@ export function VirtualMessageList({
                 messageIndex={item.index}
                 onWebSearch={onWebSearch}
                 onOpenDetails={onOpenDetails}
-                onRequestGeneralAnswer={onRequestGeneralAnswer}
               />
             );
           }

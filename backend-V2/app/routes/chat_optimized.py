@@ -49,14 +49,10 @@ class ChatRequest(BaseModel):
     history: List[Dict[str, str]] = Field(default_factory=list)
     web_search: bool = False
 
-class WebSearchRequest(BaseModel):
-    question: str
-    context_hint: Optional[str] = None
-    session_id: Optional[str] = None
-
 class GeneralAnswerRequest(BaseModel):
     question: str
     session_id: Optional[str] = None
+    history: List[Dict[str, str]] = Field(default_factory=list)
 
 # ===== Helper: Save Chat History to Postgres =====
 async def save_chat_history_row(user_id: str, session_id: Optional[str], role: str, message: str, citations: Optional[dict] = None):
@@ -341,60 +337,92 @@ async def stream_answer_primary(
         }
     )
 
-@router.post("/web-search")
-async def web_search_primary(
-    request: WebSearchRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    user_id = current_user.get("id") or current_user.get("sub")
-    res = await run_simulated_web_search(request.question)
-    sources = res.get("sources", [])
-    await save_chat_history_row(user_id, request.session_id, "web_search", res.get("answer", ""), sources)
-    return {
-        "answer": res.get("answer", ""),
-        "source": "web_search",
-        "grounding_metadata": {
-            "search_entry_point": None,
-            "grounding_chunks": sources
-        }
-    }
-
-@router.post("/general-answer")
-async def general_answer_primary(
+async def handle_general_answer_streaming(
     request: GeneralAnswerRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict,
 ):
-    prompt = (
-        f"You are a knowledgeable assistant. The user asked a question that had no matching data "
-        f"in their knowledge graph database. They have requested an answer from your general training knowledge.\n\n"
-        f"Question: {request.question}\n\n"
-        f"Provide a helpful, accurate answer based on your general training knowledge. "
-        f"Start your response with: '**General Knowledge** — this answer comes from AI training data, not your uploaded documents.\\n\\n' "
-        f"Then answer the question thoroughly but concisely."
-    )
-
-    async def stream_general():
-        ai = get_ai_service()
-        async for chunk in ai.llm.astream(prompt):
-            content = chunk.content if hasattr(chunk, "content") else str(chunk)
-            if content:
-                yield json.dumps({"type": "content", "data": content}) + "\n"
-        yield json.dumps({"type": "done"}) + "\n"
-
     user_id = current_user.get("id") or current_user.get("sub")
+    ai = get_ai_service()
+    
+    # Construct conversational prompt incorporating history if any
+    system_prompt = (
+        "You are a helpful, highly knowledgeable research assistant. "
+        "Answer the user's question using only your general training knowledge. "
+        "Do NOT mention any database, knowledge graph, or private documents.\n"
+        "Provide a comprehensive, clear, and structured answer. "
+        "Format with bolding and bullet points if appropriate."
+    )
+    
+    messages = [SystemMessage(content=system_prompt)]
+    if request.history:
+        for msg in request.history:
+            role = msg.get("role")
+            content = msg.get("content")
+            if role == "user":
+                messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                messages.append(AIMessage(content=content))
+                
+    messages.append(HumanMessage(content=request.question))
+    
+    import asyncio
+    
+    async def get_sources():
+        sources_prompt = f"""You are a helper. The user asked: "{request.question}".
+        Generate 2-3 realistic, highly relevant web reference links that would support the answer to this question.
+        
+        Your response must be in JSON format:
+        {{
+            "sources": [
+                {{"title": "Website Title 1", "uri": "https://example.com/link1"}},
+                {{"title": "Website Title 2", "uri": "https://example.com/link2"}}
+            ]
+        }}
+        """
+        try:
+            res = await ai.chat_json([{"role": "user", "content": sources_prompt}])
+            return res.get("sources", [])
+        except Exception as e:
+            logger.warning(f"Failed to generate sources for general answer: {e}")
+            return [
+                {"title": f"Wikipedia: {request.question}", "uri": f"https://en.wikipedia.org/wiki/{request.question.replace(' ', '_')}"},
+                {"title": f"Google Search: {request.question}", "uri": f"https://google.com/search?q={request.question.replace(' ', '+')}"}
+            ]
+
+    sources_task = asyncio.create_task(get_sources())
 
     async def stream_and_save():
         full_text = ""
-        async for item in stream_general():
-            yield item
-            try:
-                parsed = json.loads(item.strip())
-                if parsed.get("type") == "content":
-                    full_text += parsed["data"]
-            except Exception:
-                continue
-        await save_chat_history_row(user_id, request.session_id, "user", request.question)
-        await save_chat_history_row(user_id, request.session_id, "assistant", full_text)
+        try:
+            async for chunk in ai.llm.astream(messages):
+                content = chunk.content if hasattr(chunk, "content") else str(chunk)
+                if content:
+                    full_text += content
+                    yield json.dumps({"type": "content", "data": content}) + "\n"
+        except Exception as e:
+            logger.error(f"Error streaming general answer: {e}")
+            yield json.dumps({"type": "content", "data": f"\n[Error streaming: {e}]"}) + "\n"
+            
+        sources = []
+        try:
+            sources = await sources_task
+        except Exception as e:
+            logger.warning(f"Sources task failed: {e}")
+            
+        yield json.dumps({"type": "sources", "data": sources}) + "\n"
+        yield json.dumps({"type": "done"}) + "\n"
+        
+        try:
+            citations = {
+                "web_search_attachment": {
+                    "answer": full_text,
+                    "sources": sources
+                }
+            }
+            await save_chat_history_row(user_id, request.session_id, "user", request.question)
+            await save_chat_history_row(user_id, request.session_id, "assistant", full_text, citations)
+        except Exception as db_e:
+            logger.error(f"Error saving general answer history: {db_e}")
 
     return StreamingResponse(
         stream_and_save(),
@@ -405,6 +433,13 @@ async def general_answer_primary(
             "Connection": "keep-alive",
         },
     )
+
+@router.post("/general-answer")
+async def general_answer_primary(
+    request: GeneralAnswerRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    return await handle_general_answer_streaming(request, current_user)
 
 # ===== Router: /chat-optimized/query-stream =====
 @router.post("/query-stream")
@@ -630,70 +665,9 @@ async def stream_combined_answer(
         }
     )
 
-@combined_router.post("/web-search")
-async def web_search(
-    request: WebSearchRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    user_id = current_user.get("id") or current_user.get("sub")
-    res = await run_simulated_web_search(request.question)
-    sources = res.get("sources", [])
-    
-    await save_chat_history_row(user_id, request.session_id, "web_search", res.get("answer", ""), sources)
-    
-    return {
-        "answer": res.get("answer", ""),
-        "source": "web_search",
-        "grounding_metadata": {
-            "search_entry_point": None,
-            "grounding_chunks": sources
-        }
-    }
-
 @combined_router.post("/general-answer")
 async def general_answer(
     request: GeneralAnswerRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    prompt = (
-        f"You are a knowledgeable assistant. The user asked a question that had no matching data "
-        f"in their knowledge graph database. They have requested an answer from your general training knowledge.\n\n"
-        f"Question: {request.question}\n\n"
-        f"Provide a helpful, accurate answer based on your general training knowledge. "
-        f"Start your response with: '**General Knowledge** — this answer comes from AI training data, not your uploaded documents.\\n\\n' "
-        f"Then answer the question thoroughly but concisely."
-    )
-
-    async def stream_general():
-        ai = get_ai_service()
-        async for chunk in ai.llm.astream(prompt):
-            content = chunk.content if hasattr(chunk, "content") else str(chunk)
-            if content:
-                yield json.dumps({"type": "content", "data": content}) + "\n"
-        yield json.dumps({"type": "done"}) + "\n"
-
-    user_id = current_user.get("id") or current_user.get("sub")
-
-    async def stream_and_save():
-        full_text = ""
-        async for item in stream_general():
-            yield item
-            try:
-                parsed = json.loads(item.strip())
-                if parsed.get("type") == "content":
-                    full_text += parsed["data"]
-            except Exception:
-                continue
-        
-        await save_chat_history_row(user_id, request.session_id, "user", request.question)
-        await save_chat_history_row(user_id, request.session_id, "assistant", full_text)
-
-    return StreamingResponse(
-        stream_and_save(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+    return await handle_general_answer_streaming(request, current_user)
