@@ -1,154 +1,100 @@
 """
 Middleware Module
 
-Provides FastAPI middleware for:
-- Global error handling
+Provides pure ASGI middleware for:
 - Request logging
-- CORS configuration
+- Rate limiting
 """
 import time
 import logging
-import traceback
-from typing import Callable
-from uuid import uuid4
-
-from fastapi import Request, Response
-from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
+import json
 
 logger = logging.getLogger(__name__)
 
 
-class ErrorHandlingMiddleware(BaseHTTPMiddleware):
+class RequestLoggingMiddleware:
     """
-    Global error handling middleware.
+    Request logging middleware (Pure ASGI).
     
-    Catches all unhandled exceptions and returns
-    a consistent JSON error response.
-    NOTE: BaseHTTPMiddleware buffers the ENTIRE response body.
-    Streaming endpoints MUST be skipped to prevent SSE buffering.
+    Logs all incoming requests with timing information without buffering the response body.
+    Safe for use with StreamingResponse and SSE.
     """
-    
-    # Endpoints that use StreamingResponse — must not be buffered
-    STREAMING_PATHS = ["/stream-answer", "/sse/"]
-    
-    async def dispatch(
-        self, request: Request, call_next: Callable
-    ) -> Response:
-        # Skip streaming endpoints — BaseHTTPMiddleware buffers the entire body!
-        if any(p in request.url.path for p in self.STREAMING_PATHS):
-            return await call_next(request)
-        
-        try:
-            response = await call_next(request)
-            return response
-        except Exception as exc:
-            # Generate error ID for tracking
-            error_id = str(uuid4())[:8]
-            
-            # Log the full exception
-            logger.error(
-                f"Unhandled exception [{error_id}]: {str(exc)}\n"
-                f"Path: {request.url.path}\n"
-                f"Method: {request.method}\n"
-                f"Traceback: {traceback.format_exc()}"
-            )
-            
-            # Return sanitized error response
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "error": "Internal server error",
-                    "error_id": error_id,
-                    "message": "An unexpected error occurred. Please try again.",
-                },
-            )
+    def __init__(self, app):
+        self.app = app
 
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    """
-    Request logging middleware.
-    
-    Logs all incoming requests with timing information.
-    NOTE: BaseHTTPMiddleware buffers the ENTIRE response body.
-    Streaming endpoints MUST be skipped to prevent SSE buffering.
-    """
-    
-    # Endpoints that use StreamingResponse — must not be buffered
-    STREAMING_PATHS = ["/stream-answer", "/sse/"]
-    
-    async def dispatch(
-        self, request: Request, call_next: Callable
-    ) -> Response:
-        # Skip streaming endpoints — BaseHTTPMiddleware buffers the entire body!
-        if any(p in request.url.path for p in self.STREAMING_PATHS):
-            return await call_next(request)
-        
-        # Start timer
         start_time = time.time()
-        
-        # Process request
-        response = await call_next(request)
-        
-        # Calculate duration
-        duration_ms = int((time.time() - start_time) * 1000)
-        
-        # Log request (skip noisy endpoints)
-        if not any(path in request.url.path for path in ["/health", "/status", "/sse"]):
-            logger.info(
-                f"{request.method} {request.url.path} "
-                f"- {response.status_code} ({duration_ms}ms)"
-            )
-        
-        # Add timing header
-        response.headers["X-Response-Time"] = f"{duration_ms}ms"
-        
-        return response
+        status_code = [500]
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                status_code[0] = message.get("status", 500)
+                duration_ms = int((time.time() - start_time) * 1000)
+                
+                # Add X-Response-Time header
+                headers = list(message.get("headers", []))
+                headers.append((b"x-response-time", f"{duration_ms}ms".encode("latin-1")))
+                message["headers"] = headers
+                
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        finally:
+            duration_ms = int((time.time() - start_time) * 1000)
+            path = scope.get("path", "")
+            method = scope.get("method", "")
+            # Skip noisy endpoints
+            if not any(p in path for p in ["/health", "/status", "/sse"]):
+                logger.info(f"{method} {path} - {status_code[0]} ({duration_ms}ms)")
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
+class RateLimitMiddleware:
     """
-    Simple rate limiting middleware.
+    Simple rate limiting middleware (Pure ASGI).
     
-    Limits requests per IP per minute.
-    Uses in-memory storage (use Redis for production).
-    NOTE: BaseHTTPMiddleware buffers the ENTIRE response body.
-    Streaming endpoints MUST be skipped to prevent SSE buffering.
+    Limits requests per IP per minute without buffering responses.
+    Uses in-memory storage.
     """
-    
-    # Endpoints that use StreamingResponse — must not be buffered
-    STREAMING_PATHS = ["/stream-answer", "/sse/"]
-    
     def __init__(self, app, requests_per_minute: int = 100):
-        super().__init__(app)
+        self.app = app
         self.requests_per_minute = requests_per_minute
-        self.request_counts: dict = {}
-    
-    async def dispatch(
-        self, request: Request, call_next: Callable
-    ) -> Response:
-        # Skip streaming endpoints — BaseHTTPMiddleware buffers the entire body!
-        if any(p in request.url.path for p in self.STREAMING_PATHS):
-            return await call_next(request)
+        self.request_counts = {}
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+            
+        client = scope.get("client")
+        client_ip = client[0] if client else "unknown"
         
-        # Get client IP
-        client_ip = request.client.host if request.client else "unknown"
-        
-        # Get current minute
         current_minute = int(time.time() / 60)
         key = f"{client_ip}:{current_minute}"
         
-        # Check rate limit
         if key in self.request_counts:
             if self.request_counts[key] >= self.requests_per_minute:
-                return JSONResponse(
-                    status_code=429,
-                    content={
-                        "error": "Too many requests",
-                        "message": f"Rate limit of {self.requests_per_minute} requests per minute exceeded.",
-                        "retry_after": 60 - (int(time.time()) % 60),
-                    },
-                )
+                response_body = json.dumps({
+                    "error": "Too many requests",
+                    "message": f"Rate limit of {self.requests_per_minute} requests per minute exceeded.",
+                    "retry_after": 60 - (int(time.time()) % 60)
+                }).encode("utf-8")
+                
+                await send({
+                    "type": "http.response.start",
+                    "status": 429,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(response_body)).encode("latin-1")),
+                    ]
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": response_body,
+                })
+                return
             self.request_counts[key] += 1
         else:
             # Clean old entries
@@ -157,5 +103,5 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 if k.endswith(f":{current_minute}")
             }
             self.request_counts[key] = 1
-        
-        return await call_next(request)
+            
+        await self.app(scope, receive, send)

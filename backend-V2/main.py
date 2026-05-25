@@ -29,7 +29,7 @@ from app.db.connections import (
 )
 from app.db.neo4j_utils import create_indexes, create_fulltext_indexes, create_vector_index
 from app.core.config import settings
-from app.core.middleware import RequestLoggingMiddleware
+from app.core.middleware import RequestLoggingMiddleware, RateLimitMiddleware
 
 # Configure logging
 logging.basicConfig(
@@ -166,6 +166,9 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 # Request logging middleware
 if settings.DEBUG:
     app.add_middleware(RequestLoggingMiddleware)
+
+# Rate limiting middleware
+app.add_middleware(RateLimitMiddleware, requests_per_minute=200)
 
 
 # Global exception handler
