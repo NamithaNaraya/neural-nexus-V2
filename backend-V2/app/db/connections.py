@@ -67,7 +67,9 @@ async def init_postgres() -> None:
     
     # Convert postgres:// to postgresql+asyncpg://
     db_url = settings.DATABASE_URL
-    if db_url.startswith("postgresql://"):
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+asyncpg://"):
         db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
     
     _postgres_engine = create_async_engine(
@@ -75,6 +77,8 @@ async def init_postgres() -> None:
         echo=settings.DEBUG,
         pool_size=10,
         max_overflow=20,
+        pool_pre_ping=True,    # Check connection health before using
+        pool_recycle=3600,     # Recycle connections older than 1 hour
     )
     _postgres_session_factory = async_sessionmaker(
         _postgres_engine,

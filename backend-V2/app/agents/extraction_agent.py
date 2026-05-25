@@ -10,6 +10,7 @@ import asyncio
 import uuid
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
+import difflib
 
 from app.services.ai_service import get_ollama_service
 
@@ -151,8 +152,16 @@ Only extract what you can directly quote from the text. Favor high-fidelity node
             
             chunk_id = chunks[i].chunk_id if hasattr(chunks[i], 'chunk_id') else chunks[i].get('chunk_id', str(i))
 
+            chunk_content = chunks[i].content if hasattr(chunks[i], 'content') else chunks[i].get('content', '')
+            
             # Process entities
             for entity_data in result.get("entities", []):
+                evidence = entity_data.get("evidence", "")
+                
+                if not self._validate_evidence(evidence, chunk_content):
+                    logger.warning(f"Dropped hallucinated entity: '{entity_data.get('name')}' (Evidence not matched in text)")
+                    continue
+                    
                 entity = ExtractedEntity(
                     id=str(uuid.uuid4()),
                     name=entity_data["name"],
@@ -160,7 +169,7 @@ Only extract what you can directly quote from the text. Favor high-fidelity node
                     description=entity_data.get("description", ""),
                     properties=entity_data.get("properties", {}),
                     source_chunk_id=chunk_id,
-                    source_text=entity_data.get("evidence", ""),
+                    source_text=evidence,
                     confidence=0.9,
                 )
                 all_entities.append(entity)
@@ -168,6 +177,12 @@ Only extract what you can directly quote from the text. Favor high-fidelity node
             
             # Process relationships (will link after all entities are extracted)
             for rel_data in result.get("relationships", []):
+                evidence = rel_data.get("evidence", "")
+                
+                if not self._validate_evidence(evidence, chunk_content):
+                    logger.warning(f"Dropped hallucinated relationship: '{rel_data.get('source')} -> {rel_data.get('target')}'")
+                    continue
+                    
                 all_relationships.append({
                     **rel_data,
                     "source_chunk_id": chunk_id,
@@ -254,17 +269,33 @@ Respond with valid JSON containing "entities" and "relationships" arrays."""
     
     def _validate_evidence(
         self,
-        extraction: Any,
+        evidence: str,
         source_text: str,
     ) -> bool:
-        """Validate that extraction has valid ground-truth evidence."""
-        evidence = extraction.source_text if hasattr(extraction, 'source_text') else ""
-        
-        if not evidence:
+        """Validate that extraction has valid ground-truth evidence using fuzzy matching."""
+        if not evidence or not source_text:
             return False
-        
-        # Check if evidence appears in the source
-        evidence_lower = evidence.lower()[:50]  # First 50 chars
+            
+        evidence_lower = evidence.lower().strip()
         source_lower = source_text.lower()
         
-        return evidence_lower in source_lower
+        # Exact match check (fast path)
+        if evidence_lower in source_lower:
+            return True
+            
+        # Fuzzy matching: handles slight typos from LLM (e.g. "ram" vs "rama")
+        # We check chunks of the source text to see if there's a highly similar substring
+        chunk_size = len(evidence_lower) + 20
+        # If the chunk size is larger than the source, just compare the whole thing
+        if chunk_size >= len(source_lower):
+            similarity = difflib.SequenceMatcher(None, evidence_lower, source_lower).ratio()
+            return similarity > 0.75
+
+        # Otherwise, slide a window across the source text
+        for i in range(0, len(source_lower) - chunk_size + 1, chunk_size // 2):
+            source_slice = source_lower[i:i + chunk_size]
+            similarity = difflib.SequenceMatcher(None, evidence_lower, source_slice).ratio()
+            if similarity > 0.75:  # 75% match is generous for typos, but blocks pure hallucinations
+                return True
+                
+        return False

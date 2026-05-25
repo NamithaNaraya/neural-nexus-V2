@@ -112,7 +112,16 @@ async def lifespan(app: FastAPI):
         stt = get_stt_service()
         if stt.is_available():
             # Triggering _get_model() in a background thread to prevent blocking the main server startup
-            asyncio.create_task(asyncio.to_thread(stt._get_model))
+            async def _load_stt_model_with_logging():
+                try:
+                    await asyncio.to_thread(stt._get_model)
+                    logger.info("✅ STT Engine loaded successfully")
+                except Exception as e:
+                    logger.error(f"❌ STT background load crashed: {e}", exc_info=True)
+
+            _stt_task = asyncio.create_task(_load_stt_model_with_logging())
+            # Save a strong reference so the task isn't garbage collected mid-flight
+            app.state.stt_task = _stt_task
             logger.info("🎙️ STT Engine initializing in background...")
         else:
             logger.warning("⚠️ STT disabled — faster-whisper not installed (pip install faster-whisper)")
@@ -126,7 +135,7 @@ async def lifespan(app: FastAPI):
     # Cleanup on shutdown with timeout protection
     logger.info("🛑 Shutting down Neural Nexus Backend...")
     try:
-        async with asyncio.timeout(10.0): # 10s shutdown budget
+        async with asyncio.timeout(30.0): # 30s shutdown budget
             await close_neo4j()
             await close_postgres()
             await close_redis()
