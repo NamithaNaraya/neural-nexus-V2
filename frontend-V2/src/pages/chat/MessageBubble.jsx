@@ -373,7 +373,7 @@ const AnimatedDots = ({ tone = 'neutral' }) => {
   );
 };
 
-function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, messageIndex }) {
+function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, messageIndex, previousMessage }) {
   const [algoExpanded, setAlgoExpanded] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const isUser = message.role === 'user';
@@ -611,11 +611,16 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, messageIn
           <div className="mt-7 flex flex-wrap gap-4 border-t border-border/20 pt-7">
             {onWebSearch && !message.webSearchAnswer && message.content && (
               <button
-                onClick={() => onWebSearch({
-                  question: message.webSearchQuery || message.content,
-                  contextHint: message.content,
-                  messageIndex,
-                })}
+                onClick={() => {
+                  const searchQ = previousMessage?.role === 'user' 
+                    ? previousMessage.content 
+                    : message.webSearchQuery || message.content;
+                  onWebSearch({
+                    question: searchQ,
+                    contextHint: message.content,
+                    messageIndex,
+                  });
+                }}
                 disabled={webSearchPending}
                 className={cn(
                   'flex items-center gap-3 rounded-[20px] px-5 py-2.5 text-[11px] font-black uppercase tracking-[0.2em] transition-all disabled:opacity-50 ring-1 ring-inset',
@@ -629,7 +634,7 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, messageIn
                 ) : (
                   <Globe className="w-4 h-4" />
                 )}
-                {webSearchPending ? 'Generating...' : 'AI Knowledge'}
+                {webSearchPending ? 'Generating...' : 'Web Search'}
               </button>
             )}
 
@@ -678,7 +683,7 @@ function MessageBubbleComponent({ message, onWebSearch, onOpenDetails, messageIn
                   <div className="p-2.5 rounded-2xl bg-accent/15 backdrop-blur-md">
                     <Globe className="w-5 h-5" />
                   </div>
-                  <span className="text-[12px] font-black uppercase tracking-[0.3em]">AI Knowledge</span>
+                  <span className="text-[12px] font-black uppercase tracking-[0.3em]">Web Search Results</span>
               </div>
               {message.isStreamingWebSearch && (
                 <div className="flex items-center gap-2">

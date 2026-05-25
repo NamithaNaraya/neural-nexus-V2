@@ -24,13 +24,16 @@ export function VirtualMessageList({
       className="h-full overflow-y-auto px-6 py-8 space-y-2 scrollbar-thin scrollbar-thumb-primary/20 scrollbar-track-transparent"
     >
       <div className="flex flex-col gap-2 min-h-full">
-        {messages.map((item) => {
+        {messages.map((item, idx) => {
           if (item.type === 'message') {
+            const prevItem = messages[idx - 1];
+            const previousMessage = prevItem?.type === 'message' ? prevItem.message : null;
             return (
               <MessageBubble
                 key={item.key}
                 message={item.message}
                 messageIndex={item.index}
+                previousMessage={previousMessage}
                 onWebSearch={onWebSearch}
                 onOpenDetails={onOpenDetails}
               />
