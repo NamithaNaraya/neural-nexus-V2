@@ -9,6 +9,7 @@ import {
   zoom as d3Zoom,
   forceCollide,
   pointer as d3Pointer,
+  quadtree as d3Quadtree,
 } from 'd3';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import { AnimatePresence } from 'framer-motion';
@@ -81,6 +82,7 @@ export default function GraphForcePage({
   const masterNodesRef = useRef(new Map()); // Stores persistent node objects with x,y,vx,vy
   const lastMousePos = useRef([0, 0]);
   const requestRenderRef = useRef(() => {}); // Persistent ref to the drawing function
+  const quadtreeRef = useRef(null); // d3-quadtree for O(log n) hit-testing
   
   // Refs for visual toggles to avoid stale closures in d3 render loop
   const showNodeLabelsRef = useRef(showNodeLabels);
@@ -614,12 +616,22 @@ export default function GraphForcePage({
     if (phantomNode) {
       const dx = phantomNode.x - x;
       const dy = phantomNode.y - y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < 30) return phantomNode;
+      if (Math.sqrt(dx * dx + dy * dy) < 30) return phantomNode;
     }
 
+    const hitRadius = 22 / Math.max(0.5, transform.k);
+
+    // O(log n) quadtree lookup — falls back to O(n) scan if quadtree not built yet
+    const qt = quadtreeRef.current;
+    if (qt) {
+      const found = qt.find(x, y, hitRadius);
+      if (found && visibleNodeIds.has(found.id)) return found;
+      return null;
+    }
+
+    // Fallback: O(n) linear scan
     let closest = null;
-    let minDistance = 22; 
+    let minDistance = hitRadius;
     for (const node of allSimulationNodes) {
       if (!visibleNodeIds.has(node.id)) continue;
       const dx = node.x - x;
@@ -814,6 +826,22 @@ export default function GraphForcePage({
         ctx.translate(t.x, t.y);
         ctx.scale(t.k, t.k);
 
+        // ── Rebuild quadtree for O(log n) hit-testing ──────────────────
+        // Only build for visible nodes; do this once per frame here.
+        if (allSimulationNodes.length > 0) {
+          quadtreeRef.current = d3Quadtree()
+            .x(n => n.x).y(n => n.y)
+            .addAll(allSimulationNodes.filter(n => visibleNodeIds.has(n.id)));
+        }
+
+        // ── Viewport bounds in graph-space for culling ─────────────────
+        const CULL_PAD = 60; // px of extra margin beyond viewport edge
+        const vLeft   = (-t.x - CULL_PAD) / t.k;
+        const vRight  = (width  - t.x + CULL_PAD) / t.k;
+        const vTop    = (-t.y - CULL_PAD) / t.k;
+        const vBottom = (height - t.y + CULL_PAD) / t.k;
+        const inViewport = (x, y) => x >= vLeft && x <= vRight && y >= vTop && y <= vBottom;
+
         // 0. Draw Phantom Items (Preview)
         const pNode = phantomNodeRef.current;
         if (pNode) {
@@ -869,8 +897,11 @@ export default function GraphForcePage({
         const showDetails = t.k > 0.15 || explorerModeActiveRef.current;
         const showLabels = showDetails && showRelationshipLabelsRef.current;
 
+        // LOD: at very low zoom only draw simple circles — skip links entirely
+        const lodSimple = t.k < 0.25;
+
         // 1. Draw Links
-        allSimulationLinks.forEach(link => {
+        if (!lodSimple) allSimulationLinks.forEach(link => {
           if (!visibleLinkIds.has(link.id)) return;
           const isHighlighted = highlightedLinkIds.has(String(link.id));
           const isPredicted = Boolean(link.properties?.isPredicted);
@@ -880,6 +911,10 @@ export default function GraphForcePage({
           const sy = link.source.y;
           const tx = link.target.x;
           const ty = link.target.y;
+
+          // Viewport culling: skip links where BOTH endpoints are off-screen
+          if (!inViewport(sx, sy) && !inViewport(tx, ty)) return;
+
           const targetRadius = getNodeRadius(link.target);
 
           // Quadratic Curve Math
@@ -1018,11 +1053,23 @@ export default function GraphForcePage({
         // 3. Draw Nodes
         allSimulationNodes.forEach(node => {
           if (!visibleNodeIds.has(node.id)) return;
+
+          // Viewport culling: skip nodes entirely off-screen
+          if (!inViewport(node.x, node.y)) return;
           
           const radius = getNodeRadius(node);
           const baseColor = getNodeTypeColor(node.type, nodeTypeColors);
           const isSelected = activeNode?.id === node.id;
           const isHighlighted = highlightedNodeIds.has(String(node.id));
+
+          // LOD — simple mode: solid circle only, no halo/stroke/label
+          if (lodSimple) {
+            ctx.beginPath();
+            ctx.fillStyle = baseColor;
+            ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI);
+            ctx.fill();
+            return;
+          }
           
           // Halo (Style parity with 2D)
           ctx.beginPath();
@@ -1072,19 +1119,33 @@ export default function GraphForcePage({
     
     simulation.on('tick', requestRender);
 
-    // Initial render and recurring loop for particles
+    // Smart render loop:
+    //  • While simulation is running (alpha > 0.001): the 'tick' handler above
+    //    fires requestRender automatically — this loop just keeps RAF alive.
+    //  • After simulation settles: keep RAF alive ONLY if there are animated
+    //    particles (highlighted / predicted links). No particles → stop RAF
+    //    entirely and let user interactions trigger requestRender directly.
+    //    When highlightedLinkIds changes the useEffect re-runs and restarts.
+    const hasAnimatedLinks = () => allSimulationLinks.some(
+      l => Boolean(l.properties?.isPredicted) || highlightedLinkIds.has(String(l.id))
+    );
     let animationId;
     const loop = () => {
-      // Overdrive: Advance the simulation multiple steps per visual frame
-      if (simulation.alpha() > 0) {
-        simulation.tick(3); // 3x speed-up
-        requestRender();
+      const alpha = simulation.alpha();
+      if (alpha < 0.001) {
+        // Simulation fully settled
+        if (hasAnimatedLinks()) {
+          requestRender(); // Keep animating particles
+          animationId = window.requestAnimationFrame(loop);
+        }
+        // else: no particles — RAF stops. Zoom/click/hover will call requestRender() directly.
       } else {
-        requestRender(); // Static render for particles
+        // Simulation still running — tick handler renders, we just keep loop alive
+        animationId = window.requestAnimationFrame(loop);
       }
-      animationId = window.requestAnimationFrame(loop);
     };
     animationId = window.requestAnimationFrame(loop);
+    requestRender(); // Initial paint
 
     return () => {
       simulation.stop();
@@ -1169,13 +1230,10 @@ export default function GraphForcePage({
 
       {editMode === 'add-link' ? (
         <div className="pointer-events-none absolute left-1/2 top-4 z-20 -translate-x-1/2">
-          <div className="pointer-events-none flex items-center gap-2.5 rounded-2xl border border-accent/30 bg-accent/10 px-5 py-2.5 shadow-lg shadow-accent/5 backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-300">
-            <span className="flex h-2 w-2 rounded-full bg-accent animate-pulse" />
-            <span className="text-[12px] font-bold uppercase tracking-[0.14em] text-accent">
-              {linkDraft?.sourceNode
-                ? `Now select target node · ESC to cancel`
-                : `Select source node to build relationship · ESC to cancel`}
-            </span>
+          <div className="pointer-events-none rounded-full border border-primary/25 bg-primary/10 px-4 py-2 text-[11px] font-bold uppercase tracking-[0.16em] text-primary shadow-sm backdrop-blur-xl">
+            {linkDraft?.sourceNode
+              ? `Select target node • ESC to cancel`
+              : `Select source node • ESC to cancel`}
           </div>
         </div>
       ) : null}

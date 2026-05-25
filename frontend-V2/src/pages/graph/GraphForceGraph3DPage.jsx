@@ -480,10 +480,12 @@ export default function GraphForceGraph3DPage({
       context.textBaseline = 'middle';
       context.fillText(text, canvas.width / 2, canvas.height / 2 + 2);
 
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.needsUpdate = true;
       const material = new THREE.SpriteMaterial({ 
         map: texture, 
         transparent: true, 
-        depthWrite: true, // Enable depth write to prevent z-fighting "blinking"
+        depthWrite: true,
         depthTest: true 
       });
       
