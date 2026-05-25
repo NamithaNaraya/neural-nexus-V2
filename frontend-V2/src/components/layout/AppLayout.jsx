@@ -23,7 +23,7 @@ export function AppLayout({ children }) {
       : apiHealth === 'degraded'
         ? 'bg-warning/15 text-warning border-warning/30'
         : 'bg-muted/30 text-muted-foreground border-border/50';
-
+  //  throw new Error("Simulated Frontend Crash"); // (error handeling testing)
   return (
     <div className="app-shell-bg flex h-screen w-full overflow-hidden bg-background text-foreground selection:bg-primary/20 selection:text-primary">
       <a href="#main-content" className="skip-link">

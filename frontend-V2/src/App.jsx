@@ -10,6 +10,7 @@ import { ChakraAppProvider } from './providers/ChakraAppProvider';
 import { StoreProvider } from './providers/StoreProvider';
 import { pageLoaders } from './pages/pageLoaders';
 import { RoutePageSkeleton } from './components/skeletons/RoutePageSkeleton';
+import { ErrorBoundary } from './components/common/ErrorBoundary';
 
 const LoginPage = lazy(pageLoaders.login);
 const LandingPage = lazy(pageLoaders.landing);
@@ -316,15 +317,17 @@ function AppContent() {
 
 function App() {
   return (
-    <ChakraAppProvider>
-      <ThemeProvider>
-        <AuthProvider>
-          <Router>
-            <AppContent />
-          </Router>
-        </AuthProvider>
-      </ThemeProvider>
-    </ChakraAppProvider>
+    <ErrorBoundary>
+      <ChakraAppProvider>
+        <ThemeProvider>
+          <AuthProvider>
+            <Router>
+              <AppContent />
+            </Router>
+          </AuthProvider>
+        </ThemeProvider>
+      </ChakraAppProvider>
+    </ErrorBoundary>
   );
 }
 
