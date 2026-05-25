@@ -302,7 +302,8 @@ async def get_all_graph(
                     import json
                     try:
                         node_properties["conflicts"] = json.loads(conflicts)
-                    except:
+                    except Exception as e:
+                        logger.error(f"Caught exception: {e}", exc_info=True)
                         node_properties["conflicts"] = {}
                 elif conflicts:
                     node_properties["conflicts"] = conflicts
@@ -434,7 +435,8 @@ async def get_folder_graph(
                     import json
                     try:
                         node_properties["conflicts"] = json.loads(conflicts)
-                    except:
+                    except Exception as e:
+                        logger.error(f"Caught exception: {e}", exc_info=True)
                         node_properties["conflicts"] = {}
                 elif conflicts:
                     node_properties["conflicts"] = conflicts

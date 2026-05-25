@@ -56,7 +56,8 @@ class ConnectionManager:
             for connection in self.active_connections[user_id]:
                 try:
                     await connection.send_text(data)
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Caught exception: {e}", exc_info=True)
                     pass
     
     async def broadcast_to_room(self, message: dict, folder_id: str, exclude_user: str = None) -> None:
@@ -190,7 +191,8 @@ async def websocket_endpoint(
                                 continue
                             try:
                                 parsed = json.loads(chunk)
-                            except Exception:
+                            except Exception as e:
+                                logger.error(f"Caught exception: {e}", exc_info=True)
                                 # Skip unparseable fragments — do NOT re-wrap as content
                                 # (this was the root cause of word doubling)
                                 continue
@@ -198,13 +200,15 @@ async def websocket_endpoint(
                                 await websocket.send_text(json.dumps(
                                     {"type": "chat_chunk", "data": parsed, "request_id": request_id}
                                 ))
-                            except Exception:
+                            except Exception as e:
+                                logger.error(f"Caught exception: {e}", exc_info=True)
                                 break
                     try:
                         await websocket.send_text(json.dumps(
                             {"type": "chat_done", "request_id": request_id}
                         ))
-                    except Exception:
+                    except Exception as e:
+                        logger.error(f"Caught exception: {e}", exc_info=True)
                         pass
                 except Exception as stream_err:
                     logger.error(f"WebSocket chat_stream error: {stream_err}")

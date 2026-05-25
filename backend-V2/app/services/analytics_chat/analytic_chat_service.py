@@ -158,7 +158,8 @@ class AnalyticChatService:
                     wrow = result.fetchone()
                     if wrow:
                         weight_name = wrow.name
-            except Exception:
+            except Exception as e:
+                logger.error(f"Caught exception: {e}", exc_info=True)
                 pass
 
         answer = await self._interpret_results(query, algo_name, results, scope_info, weight_formula=weight_formula, weight_name=weight_name, resolved_node_ids=resolved_node_ids)

@@ -153,7 +153,8 @@ async def get_extraction_preview(
                     if isinstance(props, str):
                         try:
                             props = json.loads(props)
-                        except:
+                        except Exception as e:
+                            logger.error(f"Caught exception: {e}", exc_info=True)
                             props = {}
                     entities.append({
                         "id": record["id"],
@@ -413,16 +414,20 @@ async def approve_file_ingestion(
         
         # 3. Final Storage in Neo4j
         logger.info(f"[APPROVAL DEBUG] Storing {len(embedded_entities)} entities to Neo4j")
-        entity_id_map = await storage.store_entities(
-            embedded_entities, file_id, folder_id, user_id
-        )
-        logger.info(f"[APPROVAL DEBUG] stored {len(entity_id_map)} entities, entity_id_map: {list(entity_id_map.keys())[:5]}...")
         
-        logger.info(f"[APPROVAL DEBUG] Storing {len(relationships)} relationships to Neo4j")
-        rel_count = await storage.store_relationships(
-            relationships, entity_id_map, file_id, folder_id
-        )
-        logger.info(f"[APPROVAL DEBUG] Stored {rel_count} relationships")
+        driver = get_neo4j_driver()
+        async with driver.session() as neo_session:
+            async with neo_session.begin_transaction() as tx:
+                entity_id_map = await storage.store_entities(
+                    embedded_entities, file_id, folder_id, user_id, tx=tx
+                )
+                logger.info(f"[APPROVAL DEBUG] stored {len(entity_id_map)} entities, entity_id_map: {list(entity_id_map.keys())[:5]}...")
+                
+                logger.info(f"[APPROVAL DEBUG] Storing {len(relationships)} relationships to Neo4j")
+                rel_count = await storage.store_relationships(
+                    relationships, entity_id_map, file_id, folder_id, tx=tx
+                )
+                logger.info(f"[APPROVAL DEBUG] Stored {rel_count} relationships")
         
         # 4. Update status and counts in Postgres
         async with get_postgres_session() as session:

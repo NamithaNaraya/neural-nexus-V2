@@ -26,7 +26,8 @@ class GraphService:
                 if record:
                     logger.info(f"GDS version: {record['version']}")
                     return True
-            except Exception:
+            except Exception as e:
+                logger.error(f"Caught exception: {e}", exc_info=True)
                 pass
         return False
 
@@ -37,7 +38,8 @@ class GraphService:
                 result = await session.run("CALL apoc.help('apoc') YIELD name RETURN count(name) as count")
                 record = await result.single()
                 return record and record["count"] > 0
-            except Exception:
+            except Exception as e:
+                logger.error(f"Caught exception: {e}", exc_info=True)
                 pass
         return False
 
@@ -108,7 +110,8 @@ class GraphService:
             finally:
                 try:
                     await session.run("CALL gds.graph.drop($name, false)", name=projection_name)
-                except:
+                except Exception as e:
+                    logger.error(f"Caught exception: {e}", exc_info=True)
                     pass
 
 
@@ -169,7 +172,8 @@ class GraphService:
             finally:
                 try:
                     await session.run("CALL gds.graph.drop($name, false)", name=projection_name)
-                except:
+                except Exception as e:
+                    logger.error(f"Caught exception: {e}", exc_info=True)
                     pass
 
 
@@ -442,7 +446,8 @@ class GraphService:
             finally:
                 try:
                     await session.run("CALL gds.graph.drop($name, false)", name=projection_name)
-                except:
+                except Exception as e:
+                    logger.error(f"Caught exception: {e}", exc_info=True)
                     pass
 
 

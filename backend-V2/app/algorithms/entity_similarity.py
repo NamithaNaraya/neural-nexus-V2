@@ -140,7 +140,8 @@ class EntitySimilarity:
             finally:
                 try:
                     await session.run("CALL gds.graph.drop($name, false)", name=projection_name)
-                except:
+                except Exception as e:
+                    logger.error(f"Caught exception: {e}", exc_info=True)
                     pass
     
     async def _fallback_similarity(
@@ -225,7 +226,8 @@ class EntitySimilarity:
             finally:
                 try:
                     await session.run("CALL gds.graph.drop($name, false)", name=projection_name)
-                except:
+                except Exception as e:
+                    logger.error(f"Caught exception: {e}", exc_info=True)
                     pass
     
     async def knn_similarity(
@@ -296,7 +298,8 @@ class EntitySimilarity:
             finally:
                 try:
                     await session.run("CALL gds.graph.drop($name, false)", name=projection_name)
-                except:
+                except Exception as e:
+                    logger.error(f"Caught exception: {e}", exc_info=True)
                     pass
 
     # Utility functions using GDS similarity functions

@@ -106,7 +106,8 @@ class AIService:
                 if start >= 0 and end > start:
                     import json
                     return json.loads(response_text[start:end])
-            except:
+            except Exception as e:
+                logger.error(f"Caught exception: {e}", exc_info=True)
                 pass
             return {"error": "Extraction failed", "raw_response": response_text}
 

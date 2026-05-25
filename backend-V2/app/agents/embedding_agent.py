@@ -26,19 +26,7 @@ class EmbeddingAgent:
         self.ollama = get_ollama_service()
         self.model_name = model_name
         
-    async def embed_entities(
-        self,
-        entities: List[Any],
-    ) -> List[Any]:
-        """
-        Generate embeddings for entities.
-        
-        Args:
-            entities: List of validated entities
-            
-        Returns:
-            Entities with embeddings added
-        """
+
     async def embed_entities(
         self,
         entities: List[Any],
@@ -111,7 +99,7 @@ class EmbeddingAgent:
         chunks: List[Any],
     ) -> List[Any]:
         """
-        Generate embeddings for text chunks.
+        Generate embeddings for text chunks in batch.
         
         Args:
             chunks: List of text chunks
@@ -119,13 +107,16 @@ class EmbeddingAgent:
         Returns:
             Chunks with embeddings added
         """
-        logger.info(f"Generating embeddings for {len(chunks)} chunks")
+        if not chunks:
+            return []
+            
+        logger.info(f"Ollama: Starting batch embedding for {len(chunks)} chunks...")
         
         embedded_chunks = []
+        texts_to_embed = []
         
         for chunk in chunks:
             try:
-                # Convert dataclass to dict if needed
                 if hasattr(chunk, '__dataclass_fields__'):
                     chunk_dict = {
                         'chunk_id': getattr(chunk, 'chunk_id', None),
@@ -141,35 +132,25 @@ class EmbeddingAgent:
                     chunk_dict = {'content': str(chunk)}
                 
                 content = chunk_dict.get('content', '')
-                
-                if not content.strip():
-                    embedded_chunks.append(chunk_dict)
-                    continue
-                
-                # Generate embedding
-                embedding = await self.ollama.embed(content)
-                
-                # Add embedding to chunk dict
-                chunk_dict['embedding'] = embedding
-                
                 embedded_chunks.append(chunk_dict)
+                texts_to_embed.append(content)
                 
             except Exception as e:
-                logger.warning(f"Failed to embed chunk: {e}")
-                # Still include chunk - convert if needed
-                if hasattr(chunk, '__dataclass_fields__'):
-                    chunk_dict = {
-                        'chunk_id': getattr(chunk, 'chunk_id', None),
-                        'content': getattr(chunk, 'content', ''),
-                        'section_type': getattr(chunk, 'section_type', 'paragraph'),
-                    }
-                    embedded_chunks.append(chunk_dict)
-                elif isinstance(chunk, dict):
-                    embedded_chunks.append(chunk)
-                else:
-                    embedded_chunks.append(chunk)
+                logger.warning(f"Failed to prepare chunk for embedding: {e}")
         
-        logger.info(f"Generated embeddings for {len(embedded_chunks)} chunks")
+        try:
+            logger.info(f"Ollama: Sending {len(texts_to_embed)} chunks to {settings.OLLAMA_BASE_URL}...")
+            embeddings = await self.ollama.embed_batch(texts_to_embed)
+            logger.info(f"Ollama: Successfully received {len(embeddings)} chunk embeddings")
+            
+            for i, embedding in enumerate(embeddings):
+                if i < len(embedded_chunks) and texts_to_embed[i].strip():
+                    embedded_chunks[i]['embedding'] = embedding
+                    
+        except Exception as e:
+            logger.error(f"Ollama: Batch embedding failed for chunks: {e}")
+            logger.warning("Proceeding with chunks without embeddings")
+            
         return embedded_chunks
     
     async def embed_query(self, query: str) -> List[float]:

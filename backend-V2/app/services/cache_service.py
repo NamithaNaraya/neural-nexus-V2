@@ -81,7 +81,8 @@ class CacheService:
         try:
             full_key = f"{self.prefix}{scope_key}"
             return await self.get_cached_value(full_key)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Caught exception: {e}", exc_info=True)
             return None
 
     async def set_cached_graph(self, scope_key: str, data: Any) -> bool:
@@ -91,7 +92,8 @@ class CacheService:
         try:
             full_key = f"{self.prefix}{scope_key}"
             return await self.set_cached_value(full_key, data)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Caught exception: {e}", exc_info=True)
             return False
 
     async def get_cached_analytics(self, scope_key: str) -> Optional[dict]:

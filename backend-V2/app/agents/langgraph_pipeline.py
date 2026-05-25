@@ -264,22 +264,27 @@ async def storage_node(state: GraphState) -> Dict[str, Any]:
         )
         return {"entity_id_map": {}, "status": "completed"}
         
-    # Store entities
-    entity_id_map = await storage.store_entities(
-        entities, state["file_id"], state["folder_id"], state["user_id"]
-    )
-    logger.info(f"[STORAGE DEBUG] Stored {len(entity_id_map)} entities to Neo4j")
-    
-    # Store relationships
-    rel_count = await storage.store_relationships(
-        relationships, entity_id_map, state["file_id"], state["folder_id"]
-    )
-    logger.info(f"[STORAGE DEBUG] Stored {rel_count} relationships to Neo4j")
-    
-    # Store chunks
-    chunk_count = await storage.store_chunks(
-        state["chunks"], state["file_id"], state["folder_id"]
-    )
+    # Wrap in transaction for atomic commit
+    from app.db.connections import get_neo4j_driver
+    driver = get_neo4j_driver()
+    async with driver.session() as neo_session:
+        async with neo_session.begin_transaction() as tx:
+            # Store entities
+            entity_id_map = await storage.store_entities(
+                entities, state["file_id"], state["folder_id"], state["user_id"], tx=tx
+            )
+            logger.info(f"[STORAGE DEBUG] Stored {len(entity_id_map)} entities to Neo4j")
+            
+            # Store relationships
+            rel_count = await storage.store_relationships(
+                relationships, entity_id_map, state["file_id"], state["folder_id"], tx=tx
+            )
+            logger.info(f"[STORAGE DEBUG] Stored {rel_count} relationships to Neo4j")
+            
+            # Store chunks
+            chunk_count = await storage.store_chunks(
+                state["chunks"], state["file_id"], state["folder_id"], tx=tx
+            )
     
     # Update status
     await storage.update_file_status(

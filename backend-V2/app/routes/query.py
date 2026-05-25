@@ -80,7 +80,8 @@ async def _clear_session_records(
         for key in meta_keys:
             try:
                 values = await redis.hgetall(key)
-            except Exception:
+            except Exception as e:
+                logger.error(f"Caught exception: {e}", exc_info=True)
                 values = {}
             if values:
                 meta_values.update(values)
@@ -274,7 +275,8 @@ async def delete_chat_session(
         for key in meta_keys:
             try:
                 values = await redis.hgetall(key)
-            except Exception:
+            except Exception as e:
+                logger.error(f"Caught exception: {e}", exc_info=True)
                 values = {}
             if values:
                 meta_values.update(values)

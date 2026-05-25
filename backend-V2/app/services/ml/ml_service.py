@@ -36,7 +36,8 @@ class MLService:
                 {"name": pipeline_name},
             )
             logger.info(f"Dropped stale pipeline: {pipeline_name}")
-        except Exception:
+        except Exception as e:
+            logger.error(f"Caught exception: {e}", exc_info=True)
             pass
 
     async def _drop_graph_safe(self, graph_name: str):
@@ -46,7 +47,8 @@ class MLService:
                 "CALL gds.graph.drop($name, false) YIELD graphName RETURN graphName",
                 {"name": graph_name},
             )
-        except Exception:
+        except Exception as e:
+            logger.error(f"Caught exception: {e}", exc_info=True)
             pass
 
     # ═══════════════════════════════════════════════════════════
@@ -69,7 +71,8 @@ class MLService:
                 {"name": model_name},
             )
             return True
-        except Exception:
+        except Exception as e:
+            logger.error(f"Caught exception: {e}", exc_info=True)
             return False
 
     # ═══════════════════════════════════════════════════════════
@@ -120,7 +123,8 @@ class MLService:
                     numberOfDecisionTrees: 10, maxDepth: 5
                 })
             """, p)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Caught exception: {e}", exc_info=True)
             logger.info("RandomForest not available for LP, continuing with LogReg only")
 
         try:
@@ -276,7 +280,8 @@ class MLService:
                     numberOfDecisionTrees: 10, maxDepth: 6
                 })
             """, p)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Caught exception: {e}", exc_info=True)
             logger.info("RandomForest not available for NC, using LogReg only")
 
         try:

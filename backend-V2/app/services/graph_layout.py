@@ -180,7 +180,8 @@ class GraphLayoutService:
                     "CALL gds.graph.drop($graph_name)",
                     {"graph_name": graph_name}
                 )
-            except:
+            except Exception as e:
+                logger.error(f"Caught exception: {e}", exc_info=True)
                 pass
         
         return positions

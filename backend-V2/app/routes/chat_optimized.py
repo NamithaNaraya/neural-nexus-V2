@@ -180,7 +180,8 @@ class CombinedRAGService:
                 elif chunk["type"] == "web_search_suggestion":
                     suggest_web_search = chunk.get("data", True)
                     web_search_emphasized = chunk.get("emphasized", False)
-            except Exception:
+            except Exception as e:
+                logger.error(f"Caught exception: {e}", exc_info=True)
                 continue
 
         return {

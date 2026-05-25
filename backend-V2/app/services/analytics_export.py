@@ -311,7 +311,8 @@ class AnalyticsExportService:
                 if rel_types == 1 and link_count > 10:
                     score -= 10
                     issues.append("Only one relationship type - consider adding diversity")
-        except:
+        except Exception as e:
+            logger.error(f"Caught exception: {e}", exc_info=True)
             pass
         
         return {

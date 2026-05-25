@@ -39,23 +39,28 @@ class StorageAgent:
         file_id: str,
         folder_id: str,
         user_id: str,
+        tx: Any = None,
     ) -> Dict[str, str]:
         """
-        Store entities in Neo4j.
+        Store entities in Neo4j using UNWIND batching.
         
         Args:
             entities: List of validated entities
             file_id: Source file ID
             folder_id: Folder ID for scoping
             user_id: User ID for ownership
+            tx: Optional active Neo4j transaction
             
         Returns:
             Mapping of entity IDs to Neo4j node IDs
         """
-        logger.info(f"Storing {len(entities)} entities to Neo4j")
+        logger.info(f"🚀 Storing {len(entities)} entities to Neo4j using batch query")
         
         driver = get_neo4j_driver()
         entity_id_map = {}
+        
+        if not entities:
+            return entity_id_map
         
         def get_value(obj, key, default=None):
             """Safely get value from dict or dataclass."""
@@ -65,72 +70,78 @@ class StorageAgent:
                 return getattr(obj, key, default)
             return default
         
-        async with driver.session() as session:
-            for entity in entities:
-                try:
-                    # Extract entity data using helper
-                    entity_id = get_value(entity, 'id', str(uuid.uuid4()))
-                    name = get_value(entity, 'name', '')
-                    entity_type = get_value(entity, 'type', 'Concept')
-                    description = get_value(entity, 'description', '')
-                    properties = get_value(entity, 'properties', {})
-                    embedding = get_value(entity, 'embedding', None)
-                    source_text = get_value(entity, 'source_text', '')
-                    confidence = get_value(entity, 'confidence', 1.0)
-                    
-                    # Convert properties dict to JSON string (no APOC needed)
-                    properties_json = json.dumps(properties) if properties else '{}'
-                    
-                    # Create entity node - simplified without APOC
-                    result = await session.run("""
-                        MERGE (e:Entity {
-                            name: $name,
-                            type: $type,
-                            folder_id: $folder_id
-                        })
-                        ON CREATE SET
-                            e.id = $entity_id,
-                            e.description = $description,
-                            e.properties = $properties_json,
-                            e.embedding = $embedding,
-                            e.source_text = $source_text,
-                            e.confidence = $confidence,
-                            e.user_id = $user_id,
-                            e.file_ids = [$file_id],
-                            e.created_at = datetime(),
-                            e.source_count = 1
-                        ON MATCH SET
-                            e.file_ids = CASE 
-                                WHEN NOT $file_id IN e.file_ids 
-                                THEN e.file_ids + $file_id 
-                                ELSE e.file_ids 
-                            END,
-                            e.source_count = size(e.file_ids),
-                            e.updated_at = datetime()
-                        RETURN e.id as node_id
-                    """,
-                        entity_id=entity_id,
-                        name=name,
-                        type=entity_type,
-                        description=description,
-                        properties_json=properties_json,
-                        embedding=embedding,
-                        source_text=source_text,
-                        confidence=confidence,
-                        folder_id=folder_id,
-                        user_id=user_id,
-                        file_id=file_id,
-                    )
-                    
-                    record = await result.single()
-                    if record:
-                        entity_id_map[entity_id] = record["node_id"]
-                        
-                except Exception as e:
-                    logger.error(f"Failed to store entity {name}: {e}")
-                    continue
+        # Prepare batch data - extract all entity data upfront
+        batch_entities = []
+        for entity in entities:
+            try:
+                entity_dict = {
+                    'input_id': get_value(entity, 'id', str(uuid.uuid4())),
+                    'name': get_value(entity, 'name', ''),
+                    'type': get_value(entity, 'type', 'Concept'),
+                    'description': get_value(entity, 'description', ''),
+                    'properties': json.dumps(get_value(entity, 'properties', {})) or '{}',
+                    'embedding': get_value(entity, 'embedding', None),
+                    'source_text': get_value(entity, 'source_text', ''),
+                    'confidence': float(get_value(entity, 'confidence', 1.0)),
+                }
+                batch_entities.append(entity_dict)
+            except Exception as e:
+                logger.error(f"Failed to prepare entity for batch: {e}", exc_info=True)
+                continue
         
-        logger.info(f"Stored {len(entity_id_map)} entities successfully")
+        if not batch_entities:
+            logger.warning("No entities to store after preparation")
+            return entity_id_map
+        
+        async def _run_batch(runner):
+            result = await runner.run("""
+                UNWIND $entities AS entity
+                MERGE (e:Entity {
+                    name: entity.name,
+                    type: entity.type,
+                    folder_id: $folder_id
+                })
+                ON CREATE SET
+                    e.id = entity.input_id,
+                    e.description = entity.description,
+                    e.properties = entity.properties,
+                    e.embedding = entity.embedding,
+                    e.source_text = entity.source_text,
+                    e.confidence = entity.confidence,
+                    e.user_id = $user_id,
+                    e.file_ids = [$file_id],
+                    e.created_at = datetime(),
+                    e.source_count = 1
+                ON MATCH SET
+                    e.file_ids = CASE 
+                        WHEN NOT $file_id IN e.file_ids 
+                        THEN e.file_ids + $file_id 
+                        ELSE e.file_ids 
+                    END,
+                    e.source_count = size(e.file_ids),
+                    e.updated_at = datetime()
+                RETURN entity.input_id AS input_id, e.id AS node_id
+            """,
+                entities=batch_entities,
+                folder_id=folder_id,
+                user_id=user_id,
+                file_id=file_id,
+            )
+            records = await result.data()
+            for record in records:
+                entity_id_map[record["input_id"]] = record["node_id"]
+            logger.info(f"✅ Batch stored {len(entity_id_map)} entities in single query")
+
+        try:
+            if tx:
+                await _run_batch(tx)
+            else:
+                async with driver.session() as session:
+                    await _run_batch(session)
+        except Exception as e:
+            logger.error(f"❌ Failed to store entities batch: {e}", exc_info=True)
+            raise
+        
         return entity_id_map
     
     async def store_relationships(
@@ -139,23 +150,28 @@ class StorageAgent:
         entity_id_map: Dict[str, str],
         file_id: str,
         folder_id: str,
+        tx: Any = None,
     ) -> int:
         """
-        Store relationships in Neo4j.
+        Store relationships in Neo4j using UNWIND batching.
         
         Args:
             relationships: List of validated relationships
             entity_id_map: Mapping of entity IDs to Neo4j node IDs
             file_id: Source file ID
             folder_id: Folder ID for scoping
+            tx: Optional active Neo4j transaction
             
         Returns:
             Number of relationships created
         """
-        logger.info(f"Storing {len(relationships)} relationships to Neo4j")
+        logger.info(f"🚀 Storing {len(relationships)} relationships to Neo4j using batch query")
         
         driver = get_neo4j_driver()
-        created_count = 0
+        
+        if not relationships:
+            logger.info("No relationships to store")
+            return 0
         
         def get_value(obj, key, default=None):
             """Safely get value from dict or dataclass."""
@@ -165,138 +181,119 @@ class StorageAgent:
                 return getattr(obj, key, default)
             return default
         
-        async with driver.session() as session:
-            for rel in relationships:
+        # Prepare batch data - extract all relationship data upfront
+        batch_rels = []
+        for rel in relationships:
+            try:
+                source_id = get_value(rel, 'source_entity_id')
+                target_id = get_value(rel, 'target_entity_id')
+                rel_type = get_value(rel, 'type') or get_value(rel, 'relationship_type', 'RELATED_TO')
+                
+                rel_dict = {
+                    'source_id': entity_id_map.get(source_id, source_id),
+                    'target_id': entity_id_map.get(target_id, target_id),
+                    'type': sanitize_relationship_type(rel_type),
+                    'description': get_value(rel, 'description', ''),
+                    'strength': float(get_value(rel, 'strength', 1.0)),
+                    'source_text': get_value(rel, 'source_text', ''),
+                    'confidence': float(get_value(rel, 'confidence', 1.0)),
+                }
+                batch_rels.append(rel_dict)
+            except Exception as e:
+                logger.error(f"Failed to prepare relationship for batch: {e}", exc_info=True)
+                continue
+        
+        if not batch_rels:
+            logger.warning("No relationships to store after preparation")
+            return 0
+        
+        # Group by relationship type to use typed MERGE (more efficient)
+        rels_by_type = {}
+        for rel in batch_rels:
+            rel_type = rel['type']
+            if rel_type not in rels_by_type:
+                rels_by_type[rel_type] = []
+            rels_by_type[rel_type].append(rel)
+        
+        async def _run_batch(runner):
+            total_created = 0
+            for rel_type, type_rels in rels_by_type.items():
                 try:
-                    # Extract relationship data using helper
-                    source_id = get_value(rel, 'source_entity_id')
-                    target_id = get_value(rel, 'target_entity_id')
-                    rel_type = get_value(rel, 'type') or get_value(rel, 'relationship_type', 'RELATED_TO')
-                    description = get_value(rel, 'description', '')
-                    strength = get_value(rel, 'strength', 1.0)
-                    source_text = get_value(rel, 'source_text', '')
-                    confidence = get_value(rel, 'confidence', 1.0)
-                    
-                    # Map to Neo4j IDs
-                    neo4j_source = entity_id_map.get(source_id, source_id)
-                    neo4j_target = entity_id_map.get(target_id, target_id)
-                    
-                    # Sanitize relationship type to valid Neo4j format
-                    sanitized_type = sanitize_relationship_type(rel_type)
-                    
-                    # Try APOC-based dynamic relationship creation first
-                    apoc_query = """
-                        MATCH (source:Entity {id: $source_id, folder_id: $folder_id})
-                        MATCH (target:Entity {id: $target_id, folder_id: $folder_id})
-                        CALL apoc.merge.relationship(
-                            source,
-                            $rel_type,
-                            {},
-                            {
-                                description: $description,
-                                strength: $strength,
-                                source_text: $source_text,
-                                confidence: $confidence,
-                                file_ids: [$file_id],
-                                created_at: datetime()
-                            },
-                            target,
-                            {
-                                updated_at: datetime()
-                            }
-                        ) YIELD rel
-                        SET rel.file_ids = CASE 
-                            WHEN rel.file_ids IS NULL THEN [$file_id]
-                            WHEN NOT $file_id IN rel.file_ids THEN rel.file_ids + $file_id
-                            ELSE rel.file_ids
-                        END
-                        RETURN rel
+                    query = f"""
+                        UNWIND $relationships AS rel
+                        MATCH (source:Entity {{id: rel.source_id, folder_id: $folder_id}})
+                        MATCH (target:Entity {{id: rel.target_id, folder_id: $folder_id}})
+                        MERGE (source)-[r:{rel_type}]->(target)
+                        ON CREATE SET
+                            r.description = rel.description,
+                            r.strength = rel.strength,
+                            r.source_text = rel.source_text,
+                            r.confidence = rel.confidence,
+                            r.file_ids = [$file_id],
+                            r.created_at = datetime()
+                        ON MATCH SET
+                            r.file_ids = CASE 
+                                WHEN NOT $file_id IN r.file_ids 
+                                THEN r.file_ids + $file_id 
+                                ELSE r.file_ids 
+                            END,
+                            r.updated_at = datetime()
+                        RETURN count(*) AS created
                     """
                     
-                    try:
-                        result = await session.run(
-                            apoc_query,
-                            source_id=neo4j_source,
-                            target_id=neo4j_target,
-                            rel_type=sanitized_type,
-                            description=description,
-                            strength=strength,
-                            source_text=source_text,
-                            confidence=confidence,
-                            folder_id=folder_id,
-                            file_id=file_id,
-                        )
-                        record = await result.single()
-                        if record:
-                            created_count += 1
-                    except Exception as apoc_error:
-                        # APOC not available, use fallback with dynamic type in query
-                        logger.debug(f"APOC not available, using fallback: {apoc_error}")
-                        
-                        fallback_query = f"""
-                            MATCH (source:Entity {{id: $source_id, folder_id: $folder_id}})
-                            MATCH (target:Entity {{id: $target_id, folder_id: $folder_id}})
-                            MERGE (source)-[r:{sanitized_type}]->(target)
-                            ON CREATE SET
-                                r.description = $description,
-                                r.strength = $strength,
-                                r.source_text = $source_text,
-                                r.confidence = $confidence,
-                                r.file_ids = [$file_id],
-                                r.created_at = datetime()
-                            ON MATCH SET
-                                r.file_ids = CASE 
-                                    WHEN NOT $file_id IN r.file_ids 
-                                    THEN r.file_ids + $file_id 
-                                    ELSE r.file_ids 
-                                END,
-                                r.updated_at = datetime()
-                            RETURN r
-                        """
-                        
-                        result = await session.run(
-                            fallback_query,
-                            source_id=neo4j_source,
-                            target_id=neo4j_target,
-                            description=description,
-                            strength=strength,
-                            source_text=source_text,
-                            confidence=confidence,
-                            folder_id=folder_id,
-                            file_id=file_id,
-                        )
-                        record = await result.single()
-                        if record:
-                            created_count += 1
-                        
+                    result = await runner.run(
+                        query,
+                        relationships=type_rels,
+                        folder_id=folder_id,
+                        file_id=file_id,
+                    )
+                    
+                    record = await result.single()
+                    created = record["created"] if record else 0
+                    total_created += created
+                    logger.debug(f"Batch created {created} {rel_type} relationships")
+                    
                 except Exception as e:
-                    logger.error(f"Failed to store relationship: {e}")
+                    logger.error(f"❌ Failed to store {rel_type} relationships batch: {e}", exc_info=True)
+                    if tx:
+                        raise # Bubble up if in transaction to rollback
                     continue
+            return total_created
+            
+        if tx:
+            total_created = await _run_batch(tx)
+        else:
+            async with driver.session() as session:
+                total_created = await _run_batch(session)
         
-        logger.info(f"Stored {created_count} relationships successfully")
-        return created_count
+        logger.info(f"✅ Batch stored {total_created} relationships across {len(rels_by_type)} types")
+        return total_created
     
     async def store_chunks(
         self,
         chunks: List[Any],
         file_id: str,
         folder_id: str,
+        tx: Any = None,
     ) -> int:
         """
-        Store text chunks in Neo4j for retrieval.
+        Store text chunks in Neo4j using UNWIND batching.
         
         Args:
             chunks: List of text chunks with embeddings
             file_id: Source file ID
             folder_id: Folder ID
+            tx: Optional active Neo4j transaction
             
         Returns:
             Number of chunks stored
         """
-        logger.info(f"Storing {len(chunks)} chunks to Neo4j")
+        logger.info(f"🚀 Storing {len(chunks)} chunks to Neo4j using batch query")
         
         driver = get_neo4j_driver()
-        stored_count = 0
+        
+        if not chunks:
+            return 0
         
         def get_value(obj, key, default=None):
             """Safely get value from dict or dataclass."""
@@ -306,44 +303,65 @@ class StorageAgent:
                 return getattr(obj, key, default)
             return default
         
-        async with driver.session() as session:
-            for chunk in chunks:
-                try:
-                    chunk_id = get_value(chunk, 'chunk_id', str(uuid.uuid4()))
-                    content = get_value(chunk, 'content', '')
-                    embedding = get_value(chunk, 'embedding', None)
-                    section_type = get_value(chunk, 'section_type', 'paragraph')
-                    section_title = get_value(chunk, 'section_title', None)
-                    
-                    await session.run("""
-                        CREATE (c:Chunk {
-                            id: $chunk_id,
-                            content: $content,
-                            embedding: $embedding,
-                            section_type: $section_type,
-                            section_title: $section_title,
-                            file_id: $file_id,
-                            folder_id: $folder_id,
-                            created_at: datetime()
-                        })
-                    """,
-                        chunk_id=chunk_id,
-                        content=content,
-                        embedding=embedding,
-                        section_type=section_type,
-                        section_title=section_title,
-                        file_id=file_id,
-                        folder_id=folder_id,
-                    )
-                    
-                    stored_count += 1
-                    
-                except Exception as e:
-                    logger.error(f"Failed to store chunk: {e}")
-                    continue
+        # Prepare batch data - extract all chunk data upfront
+        batch_chunks = []
+        for chunk in chunks:
+            try:
+                chunk_dict = {
+                    'chunk_id': get_value(chunk, 'chunk_id', str(uuid.uuid4())),
+                    'content': get_value(chunk, 'content', ''),
+                    'embedding': get_value(chunk, 'embedding', None),
+                    'section_type': get_value(chunk, 'section_type', 'paragraph'),
+                    'section_title': get_value(chunk, 'section_title', None),
+                    'start_position': int(get_value(chunk, 'start_position', 0)),
+                    'end_position': int(get_value(chunk, 'end_position', 0)),
+                }
+                batch_chunks.append(chunk_dict)
+            except Exception as e:
+                logger.error(f"Failed to prepare chunk for batch: {e}", exc_info=True)
+                continue
         
-        logger.info(f"Stored {stored_count} chunks successfully")
-        return stored_count
+        if not batch_chunks:
+            logger.warning("No chunks to store after preparation")
+            return 0
+        
+        async def _run_batch(runner):
+            result = await runner.run("""
+                UNWIND $chunks AS chunk
+                CREATE (c:Chunk {
+                    id: chunk.chunk_id,
+                    content: chunk.content,
+                    embedding: chunk.embedding,
+                    section_type: chunk.section_type,
+                    section_title: chunk.section_title,
+                    start_position: chunk.start_position,
+                    end_position: chunk.end_position,
+                    file_id: $file_id,
+                    folder_id: $folder_id,
+                    created_at: datetime()
+                })
+                RETURN count(*) AS stored
+            """,
+                chunks=batch_chunks,
+                file_id=file_id,
+                folder_id=folder_id,
+            )
+            record = await result.single()
+            return record["stored"] if record else 0
+
+        try:
+            if tx:
+                stored_count = await _run_batch(tx)
+            else:
+                async with driver.session() as session:
+                    stored_count = await _run_batch(session)
+            
+            logger.info(f"✅ Batch stored {stored_count} chunks in single query")
+            return stored_count
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to store chunks batch: {e}", exc_info=True)
+            raise
     
     async def update_file_status(
         self,

@@ -61,7 +61,8 @@ class TopicClustering:
                 # Clean up existing projection
                 try:
                     await session.run("CALL gds.graph.drop($name, false)", name=projection_name)
-                except:
+                except Exception as e:
+                    logger.error(f"Caught exception: {e}", exc_info=True)
                     pass
                 
                 # Create projection
@@ -157,7 +158,8 @@ class TopicClustering:
                         mod_record = await mod_result.single()
                         if mod_record:
                             modularity = mod_record["modularity"]
-                    except:
+                    except Exception as e:
+                        logger.error(f"Caught exception: {e}", exc_info=True)
                         pass
                 
                 # Generate insight
@@ -191,7 +193,8 @@ class TopicClustering:
             finally:
                 try:
                     await session.run("CALL gds.graph.drop($name, false)", name=projection_name)
-                except:
+                except Exception as e:
+                    logger.error(f"Caught exception: {e}", exc_info=True)
                     pass
     
     async def get_cluster_bridges(
@@ -245,7 +248,8 @@ class TopicClustering:
             finally:
                 try:
                     await session.run("CALL gds.graph.drop($name, false)", name=projection_name)
-                except:
+                except Exception as e:
+                    logger.error(f"Caught exception: {e}", exc_info=True)
                     pass
 
     async def compare_clusters(

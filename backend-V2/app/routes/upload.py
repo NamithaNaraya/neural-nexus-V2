@@ -219,7 +219,8 @@ def _extract_file_content(file_bytes: bytes, file_type: str) -> str:
                     df = pd.read_csv(io.StringIO(content), sep=sep)
                     return df.to_string(index=False)
                 return content
-            except Exception:
+            except Exception as e:
+                logger.error(f"Caught exception: {e}", exc_info=True)
                 continue
         raise ValueError("Could not decode or parse file content")
     
@@ -373,7 +374,8 @@ async def upload_file(
                             progress=100,
                             message=f"Cypher ingestion complete: {result['node_count']} nodes",
                         )
-                    except Exception:
+                    except Exception as e:
+                        logger.error(f"Caught exception: {e}", exc_info=True)
                         pass
                         
                 except Exception as e:
@@ -391,7 +393,8 @@ async def upload_file(
                             progress=0,
                             message=f"Cypher ingestion failed: {str(e)}",
                         )
-                    except Exception:
+                    except Exception as e:
+                        logger.error(f"Caught exception: {e}", exc_info=True)
                         pass
 
             background_tasks.add_task(run_managed_cypher)
@@ -615,7 +618,8 @@ async def upload_cypher(
         try:
             storage = StorageAgent()
             await storage.update_file_status(file_id, "failed", error_message=str(e))
-        except:
+        except Exception as e:
+            logger.error(f"Caught exception: {e}", exc_info=True)
             pass
             
         raise HTTPException(
