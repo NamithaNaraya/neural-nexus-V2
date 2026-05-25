@@ -792,11 +792,6 @@ class LangGraphRAGService:
                 except Exception as gds_err:
                     gds_algorithm = router_gds_hint
                     logger.warning(f"[LangGraph-Stream] GDS execution failed (using hint '{gds_algorithm}'): {gds_err}")
-                    
-            yield {
-                "type": "gds_results",
-                "data": {"algorithm": gds_algorithm, "results": gds_results_data[:20]}
-            }
 
             # --- 3. Web Search ---
             web_result = None
@@ -815,6 +810,15 @@ class LangGraphRAGService:
             yield {"type": "step", "id": 4, "status": "Querying vector and lexical indices..."}
             retriever_res = await retriever_node(state)
             state.update(retriever_res)
+            
+            # Use vector results as fallback for standard RAG if GDS didn't run
+            if not gds_results_data and state.get("vector_results"):
+                gds_results_data = state["vector_results"]
+                
+            yield {
+                "type": "gds_results",
+                "data": {"algorithm": gds_algorithm, "results": gds_results_data[:20]}
+            }
             
             # --- 5. Graph Context Enrichment & Stats ---
             state.update(await enricher_node(state))

@@ -37,7 +37,7 @@ def get_hybrid_rag_system_prompt(graph_context: str, backbone: str = "", gds_sum
         "\"I don't have enough information in this knowledge base to answer that.\"\n"
         "3. Write in clear, plain English. Never use graph notation like "
         "\"A -[REL]-> B\" or technical jargon like \"nodes\" or \"edges\".\n"
-        "4. Explain connections and what they mean — don't just list raw data.\n"
+        "4. Explain connections and what they mean — don't just list raw data. Explicitly explain WHY you arrived at this answer by mentioning the database connections (e.g. 'According to the database, these are connected because...').\n"
         "5. Answer directly. No preambles like \"Based on the context\" or "
         "\"According to the knowledge graph\".\n"
         "6. Use bullet points or numbered lists for multi-item answers. "
