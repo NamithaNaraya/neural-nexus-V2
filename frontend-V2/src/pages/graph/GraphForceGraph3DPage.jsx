@@ -64,8 +64,8 @@ export default function GraphForceGraph3DPage({
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [expandDepth, setExpandDepth] = useState(1);
   const [expandRelationshipTypes, setExpandRelationshipTypes] = useState([]);
-  const [hoveredNodeId, setHoveredNodeId] = useState(null);
-  const [draggingNodeId, setDraggingNodeId] = useState(null);
+  const hoveredNodeIdRef = useRef(null);
+  const draggingNodeIdRef = useRef(null);
   const [hydrating, setHydrating] = useState(false);
   const forceRefreshRef = useRef(false);
   const graphRef = useRef(null);
@@ -371,7 +371,13 @@ export default function GraphForceGraph3DPage({
 
   const handleNodeDragEnd = (node) => {
     if (!node) return;
-    setDraggingNodeId(null);
+    draggingNodeIdRef.current = null;
+    const controls = graphRef.current?.controls?.();
+    if (controls) {
+      controls.enabled = true;
+      controls.enableRotate = !hoveredNodeIdRef.current;
+    }
+    
     if (lockDraggedNodes) {
       node.fx = node.x;
       node.fy = node.y;
@@ -434,6 +440,12 @@ export default function GraphForceGraph3DPage({
       controls.panSpeed = 0.9;
     }
 
+    // Limit repulsion distance to prevent nodes flying to infinity without links
+    const chargeForce = graphInstance.d3Force('charge');
+    if (chargeForce) {
+      chargeForce.distanceMax(1200);
+    }
+
     if (!renderedGraph.nodes.length) return;
     graphInstance.d3ReheatSimulation?.();
     if (didAutoFitRef.current) return;
@@ -445,11 +457,7 @@ export default function GraphForceGraph3DPage({
     return () => clearTimeout(timeout);
   }, [renderedGraph.nodes.length, renderedGraph.links.length]);
 
-  useEffect(() => {
-    const domElement = graphRef.current?.renderer?.()?.domElement;
-    if (!domElement) return;
-    domElement.style.cursor = 'pointer';
-  }, [draggingNodeId, renderedGraph.nodes.length]);
+  // Handled directly in onNodeHover and onNodeDrag to prevent React render cycle overhead
 
   const createTextSprite = (text, color = '#1e293b', bgColor = 'rgba(255, 255, 255, 0.9)') => {
     if (!text) return null;
@@ -518,7 +526,6 @@ export default function GraphForceGraph3DPage({
                 graphData={renderedGraph}
                 backgroundColor="rgba(0,0,0,0)"
                 enableNodeDrag
-                enableNavigationControls={!hoveredNodeId && !draggingNodeId}
                 nodeColor={(node) => {
                   const isHighlighted = highlightedNodeIds.has(String(node.id));
                   if (!hasPathHighlights) return node.color;
@@ -587,16 +594,25 @@ export default function GraphForceGraph3DPage({
                 }}
                 onNodeClick={handleNodeClick}
                 onNodeHover={(node) => {
-                  setHoveredNodeId(node?.id ?? null);
+                  hoveredNodeIdRef.current = node?.id ?? null;
                   const domElement = graphRef.current?.renderer?.()?.domElement;
-                  if (!domElement) return;
-                  domElement.style.cursor = 'pointer';
+                  if (domElement) {
+                    domElement.style.cursor = node ? 'pointer' : 'default';
+                  }
+                  const controls = graphRef.current?.controls?.();
+                  if (controls && !draggingNodeIdRef.current) {
+                    controls.enableRotate = !hoveredNodeIdRef.current;
+                  }
                 }}
                 onNodeDrag={(node) => {
                   if (!node) return;
-                  setDraggingNodeId(node.id);
+                  draggingNodeIdRef.current = node.id;
                   const domElement = graphRef.current?.renderer?.()?.domElement;
-                  if (domElement) domElement.style.cursor = 'pointer';
+                  if (domElement) domElement.style.cursor = 'grabbing';
+                  const controls = graphRef.current?.controls?.();
+                  if (controls) {
+                    controls.enabled = false; // Completely disable during active drag
+                  }
                 }}
                 onNodeDragEnd={handleNodeDragEnd}
                 onLinkClick={handleRelationshipClick}

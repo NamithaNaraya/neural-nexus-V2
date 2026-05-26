@@ -10,6 +10,8 @@ import {
   forceCollide,
   pointer as d3Pointer,
   quadtree as d3Quadtree,
+  forceX,
+  forceY,
 } from 'd3';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import { AnimatePresence } from 'framer-motion';
@@ -662,14 +664,21 @@ export default function GraphForcePage({
     if (!simulationRef.current) {
       simulationRef.current = forceSimulation()
         .force('link', forceLink().id(d => d.id).distance(110).strength(1.0))
-        .force('charge', forceManyBody().strength(-200))
+        .force('charge', forceManyBody().strength(-200).distanceMax(1500))
         .force('center', forceCenter(width / 2, height / 2))
+        .force('x', forceX(width / 2).strength(0.04))
+        .force('y', forceY(height / 2).strength(0.04))
         .force('collide', forceCollide((node) => getNodeRadius(node) + 16).iterations(2))
         .velocityDecay(0.24) // Slightly more friction to stabilize 3x speed
         .alphaDecay(0.022);
     }
 
     const simulation = simulationRef.current;
+    
+    // Ensure forces update if canvas resized
+    simulation.force('center', forceCenter(width / 2, height / 2));
+    simulation.force('x', forceX(width / 2).strength(0.04));
+    simulation.force('y', forceY(height / 2).strength(0.04));
     
     // Only update data, don't restart simulation with high alpha if just filtering
     const isNewData = simulation.nodes().length === 0;
