@@ -5,7 +5,7 @@ import api from './api';
  * Handles loading and managing chat sessions from PostgreSQL
  */
 
-const CHAT_REQUEST_TIMEOUT_MS = 8000;
+const CHAT_REQUEST_TIMEOUT_MS = 30000;
 
 export const chatService = {
   /**

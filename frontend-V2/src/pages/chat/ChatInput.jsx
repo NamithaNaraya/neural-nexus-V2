@@ -51,7 +51,13 @@ export function ChatInput({
       console.log('🎙️ Recording started (Local)');
     } catch (err) {
       console.error('🎙️ Failed to start recording:', err);
-      toast.error('Could not access microphone.');
+      if (err.name === 'NotFoundError') {
+        toast.error('No microphone found. Please connect a microphone and try again.');
+      } else if (err.name === 'NotAllowedError') {
+        toast.error('Microphone access denied. Please allow microphone permissions in your browser.');
+      } else {
+        toast.error('Could not access microphone.');
+      }
     }
   };
 
